@@ -16,7 +16,8 @@
 | **⚖️ 資訊查核** | `資訊查核`, `查核`, `事實查核`, `闢謠`, `真的假的` | 進行真偽鑑定、AI 參與度分析、Cofacts 比對與資料來源核實出處。 |
 | **🎬 影片整理** | `影片整理`, `整理`, `影片大綱`, `大綱`, `摘要` | 抓取 YouTube oEmbed 資訊並生成核心精華大綱。 |
 | **🔍 詐騙網址偵測** | `詐騙`, `釣魚`, `可疑`, `偵測`, `安全嗎`, `網址查核` | 静態風險評分結合即時網頁抓取與 AI 深度鑑識，判定是否為釣魚連結。 |
-| **📋 指令查詢** | `指令查詢`, `幫助`, `help`, `/help` | 顯示目前的指令表與使用範例。 |
+| **📋 指令查詢** | `指令查詢`, `幫助`, `help`, `/help` | 顯示目前的四大功能指令表與使用範例。 |
+| **⚙️ 查詢 ID** | `/get_id`, `/get_group_id`, `/my_id` | 查詢群組 Group ID 或個人 User ID，供管理員加入試算表或屬性白名單。 |
 
 > 💡 **小撇步**：想查今天天氣、即時新聞或生活問題時，只要在訊息中輸入 **`@AI`**、**`@ai`**、**`@Ai`**、**`@Bot`** 或 **`@bot`** 即可！
 > 💡 **小撇步**：一般聊天沒提到機器人或關鍵字時，機器人會保持靜默，不擾民、不洗版。
@@ -32,13 +33,13 @@
 
 ### 🛡️ 多模型自動降級備援機制 (Auto-Fallback)
 
-為應對大型模型在高負載時可能出現的 503 或 429 錯誤，系統建立了一套官方正式支援的五階多層防護網，按效能與延遲順序自動切換模型：
+為應對大型模型在高負載時可能出現的 503 或 429 錯誤，系統建立了一套 Google 官方最新、新用戶 100% 支援的四階多層防護網，按效能與延遲順序自動切換模型：
 
-1. **Gemini 3.8 Flash** (Tier 1 尖端旗艦首選：2026 最新主力，推論、多模態與鑑識能力最強)
-2. **Gemini 2.5 Flash** (Tier 2 穩定基石：官方正式長期支援版，配額最充足、最少過載，Free Tier 最佳保底)
-3. **Gemini 3 Flash Preview** (Tier 3 新世代預覽：3 系列標準 Flash，平衡速度與推理深度)
-4. **Gemini 3.1 Flash-Lite-Preview** (Tier 4 極速防線：極低延遲、高頻率配額，確保 LINE Webhook 絕不逾時)
-5. **Gemini 2.5 Pro** (Tier 5 備援旗艦：高難度複雜鑑識保底備用)
+1. **Gemini 3 Flash Preview (`gemini-3-flash-preview`)** (Tier 1 主力首選：2026 全新 3 系列架構，推論、多模態與鑑識能力最強，新帳號原生支援)
+2. **Gemini 3.1 Flash-Lite-Preview (`gemini-3.1-flash-lite-preview`)** (Tier 2 極速防線：極低延遲、高頻率配額，確保 LINE Webhook 絕不逾時)
+3. **Gemini 2.5 Flash (`gemini-2.5-flash`)** (Tier 3 穩定備援：官方經典穩定 Flash 版)
+4. **Gemini 3.1 Pro Preview (`gemini-3.1-pro-preview`)** (Tier 4 旗艦備援：**Google 官方指定取代 2.5-pro 之最新深度旗艦**，專責高難度複雜鑑識)
+
 
 ### 🌐 免帳號、免綁卡之深度事實查核 (Deep Web Fact-Checking)
 
@@ -125,9 +126,10 @@
 | 比較維度 | 經典版：[`Code.gs`](./Code.gs) | 進階旗艦版：[`Code_Interactions.gs`](./Code_Interactions.gs) |
 | :--- | :--- | :--- |
 | **產品定位** | **專職事實查核與防詐衛士** | **全功能智慧生活 + 事實查核 AI 助手** |
-| **底層 API 規格** | Google Gemini `generateContent` API | Google Gemini 新世代 `Interactions API` (`/v1beta/interactions`) |
+| **底層 API 規格** | Google Gemini `generateContent` API | Google Gemini 官方標準 `generateContent` API（附萬能解析器相容各版本 JSON） |
+| **模型調度順序** | `gemini-3-flash-preview` ➔ `3.1-flash-lite` ➔ `2.5-flash` ➔ `3.1-pro-preview` | `gemini-3-flash-preview` ➔ `3.1-flash-lite` ➔ `2.5-flash` ➔ `3.1-pro-preview` |
 | **AI 提示詞架構** | 三模式獨立切換 (查核 / 整理 / 詐騙) | 統整型 Agent 指示詞 (由 AI 自動判斷意圖並動態排版) |
-| **群組喚醒機制** | 純關鍵字精確比對觸發 (查核、整理、詐騙) | **雙軌制：主動 @TAG 喚醒 + 被動關鍵字守護** |
+| **群組喚醒機制** | 純關鍵字精確比對觸發 (查核、整理、詐騙) | **雙軌制：主動 @TAG 喚醒 (@AI/@bot) + 被動關鍵字守護** |
 | **一對一私訊** | ⛔ 不開放（一律禮貌婉拒） | 🟢 支援（授權後可直接一對一私訊暢聊） |
 | **即時生活問答<br>(今天天氣、時事)** | ❌ 不支援（只處理查核與整理） | 🟢 支援（只要 @TAG，自動上網檢索並回答） |
 | **DuckDuckGo 檢索範圍** | 僅限「事實查核」時觸發 | **全面支援**：@TAG 查天氣/時事，或未 TAG 時查核謠言皆會上網 |

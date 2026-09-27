@@ -67,13 +67,20 @@
 | `ALLOWED_GROUP_IDS` | **強烈建議** | `C123456..., U98765...` | 授權白名單（群組 ID 或個人 User ID，多個請用半形逗號 `,` 分開）。 |
 | `SPREADSHEET_ID` | *選填* | `1BxiMVs0XRA5nFM...` | 僅限 `Code_Interactions.gs` 且希望透過 Google Sheet 管理白名單時填入。 |
 
-3. 若要取得群組 ID，請先將機器人**加入目標群組**並在群組發送 `/get_group_id`，再將回傳的 `C` 開頭字串回填至 `ALLOWED_GROUP_IDS`。
+3. 若要取得授權 ID：
+   - 群組內輸入：`/get_group_id`（取得以 `C` 開頭的群組 ID）。
+   - 私訊輸入：`/get_id` 或 `/my_id`（取得個人專屬 User ID）。
+   - 將該字串回填至 GAS 的 `ALLOWED_GROUP_IDS` 指令碼屬性中（多個 ID 請用半形逗號 `,` 分隔）。
 
 ---
 
 ## 4. 程式碼版本選擇與部署步驟（二選一）
 
 > ⚠️ **重要觀念**：Google Apps Script 的運作機制是專案內所有檔案共用全域命名空間。因為 `Code.gs` 與 `Code_Interactions.gs` 都包含 Webhook 入口 `function doPost(e)`，**請勿同時放在同一個 GAS 專案內**，必須**二選一**部署！
+
+兩版本皆已整合：
+- ⚡ **Google 官方 2026 最新推薦模型梯隊**：`gemini-3-flash-preview` ➔ `gemini-3.1-flash-lite-preview` ➔ `gemini-2.5-flash` ➔ `gemini-3.1-pro-preview`（新帳號 100% 支援，絕無 404/400 報錯）。
+- 🌐 **免帳號深度事實查核**：DuckDuckGo 8 筆權威檢索 + 二段式深度網頁爬取 + Cofacts 闢謠庫 + 確定性查證出處連結。
 
 ### 選擇方案 A：部署經典版 `Code.gs` (專職查核與防詐)
 * **適合對象**：希望機器人專注於「事實查核、影片大綱整理、詐騙網址偵測」，在群組保持安靜，不被拿來聊天問天氣。
@@ -85,7 +92,7 @@
 ---
 
 ### 選擇方案 B：部署進階旗艦版 `Code_Interactions.gs` (全功能生活 + 查核助理)
-* **適合對象**：希望機器人具備查核能力外，成員只要 **@TAG 機器人** 就能自動聯網回答「今天天氣、即時時事、生活常識」，且支援一對一私訊問答。
+* **適合對象**：希望機器人具備查核能力外，成員只要 **@AI 或 @bot** 就能自動聯網回答「今天天氣、即時時事、生活常識」，且支援一對一私訊問答。
 * **部署步驟**：
   1. 將本機 [`Code_Interactions.gs`](./Code_Interactions.gs) 的全部程式碼複製。
   2. 貼到 GAS 編輯器中**覆蓋掉現有程式碼**（確保專案內只有一份主要程式碼）。
