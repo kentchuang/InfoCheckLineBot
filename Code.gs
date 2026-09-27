@@ -1,13 +1,13 @@
 /**
  * AI 資訊查核助手 LINE Bot
- * 版別：v2026.08.15.02
+ * 版別：v2026.09.28.01-deep-search
  * 部署環境: Google Apps Script (GAS)
  *
  * [部署備註]
- * 1. 優化事實查核提示詞：強化「行銷包裝」與「內容實質」的區分能力，避免因標題黨而誤判內容。
- * 2. 新增 AI 參與度評估：更細緻地辨識 AI 輔助製作與純 AI 內容農場的差異。
+ * 1. 免帳號深度聯網查證：整合 DuckDuckGo 多筆權威檢索 + 二段式深度網頁內文爬取 + Cofacts 闢謠庫，完全不需申請帳號、免綁卡。
+ * 2. 支援純文字與影片查核：不再限制僅能查 YouTube，純文字長輩圖與謠言亦可直接深度查證。
  * 3. 角色定位升級：以資深數位內容鑑識專家與專業事實查核員進行回應。
- * 4. 建立 5 階分層模型調度梯隊：優先以 Gemini 3.7 Flash 進行深度鑑識，並具備同代、跨世代與極速防逾時保底機制。
+ * 4. 更正官方有效模型梯隊：主力採用 gemini-2.5-flash，次主力 gemini-3-flash-preview，搭配 gemini-3.1-flash-lite-preview 與 gemini-2.5-pro 備援防線。
  */
 
 // 1. 金鑰讀取 (從 GAS 「指令碼屬性」中讀取，確保安全性)
@@ -55,24 +55,41 @@ function processMessage(event) {
     return;
   }
 
-  // 2. 指令查詢
-  if (userText === '指令查詢' || userText === '幫助' || userText === '/help') {
-    const helpMsg = `🤖 AI 資訊查核助手 指令表：
+  // 2. 指令查詢與使用指南
+  if (userText === '指令查詢' || userText === '幫助' || userText === '/help' || userText === 'help') {
+    const helpMsg = `🤖 AI 資訊查核助手｜使用指南
 
-▫️ 資訊查核 [YouTube連結]
-   關鍵字：查核、核實、確認
+🌟 核心功能說明：
 
-▫️ 影片整理 [YouTube連結]
-   關鍵字：大綱、摘要、整理
+1️⃣ 即時聯網查證與問答
+▫️ 用法：群組中請輸入 @AI 或 @bot 喚醒機器人
+▫️ 範例：
+  • @AI 2026年中秋節是哪一天？
+  • @bot 明天天氣如何？
+  （系統自動多方聯網搜尋，文末附上核實依據連結 🔗）
 
-🔍 詐騙網址偵測 [任意連結]
-   關鍵字：詐騙、釣魚、可疑、偵測、網址查核
+2️⃣ 假訊息與謠言事實查核
+▫️ 用法：輸入文字並包含「真的嗎/真的假的/造謠/查核」
+▫️ 範例：
+  • 真的假的？聽說吃菠菜配豆腐會結石？
+  • @AI 請查核這則節能補助簡訊是不是真的
+  （串接 Cofacts 真的假的闢謠庫 與 台灣事實查核中心）
 
-📋 指令查詢 / 幫助 / /help
+3️⃣ 影片整理與核實
+▫️ 用法：貼上 YouTube 連結 ＋ 需求
+▫️ 範例：
+  • 幫我整理影片大綱 https://youtu.be/...
+  • 查核這部影片有沒有造謠 https://youtu.be/...
 
-💡 範例：
-影片大綱 https://youtu.be/...
-這個網址有詐騙嗎 https://xxx.shop/...`;
+4️⃣ 詐騙與可疑網址偵測
+▫️ 用法：貼上網址 ＋ 詢問安全性
+▫️ 範例：
+  • 這個網站有詐騙嗎 https://xxx.shop/...
+
+────────────────
+⚙️ 系統指令：
+• /help 或 指令查詢：查看本說明
+• /get_group_id：查詢群組專屬 ID`;
     replyToLine(replyToken, helpMsg);
     return;
   }
@@ -104,9 +121,9 @@ function processMessage(event) {
     .replace(/[\s:：、，。！!？?]+$/g, '')
     .trim();
 
-  // 資訊查核與影片整理：改為「完全比對 (Exact Match)」，必須完全符合關鍵字
-  let isFactCheck = factKeywords.includes(commandText);
-  let isSummary = summaryKeywords.includes(commandText);
+  // 資訊查核與影片整理：支援完全比對或以關鍵字起首
+  let isFactCheck = factKeywords.includes(commandText) || factKeywords.some(kw => userText.startsWith(kw) || userText.startsWith('請' + kw) || userText.startsWith('幫我' + kw) || userText.startsWith('請幫我' + kw));
+  let isSummary = summaryKeywords.includes(commandText) || summaryKeywords.some(kw => userText.startsWith(kw) || userText.startsWith('請' + kw) || userText.startsWith('幫我' + kw) || userText.startsWith('請幫我' + kw));
 
   // 詐騙網址偵測：維持「包含比對」，因為詢問句式較多變 (如：這安全嗎)
   let isScamCheck = scamKeywords.some(kw => userText.includes(kw));
@@ -128,15 +145,13 @@ function processMessage(event) {
     return;
   }
 
-  // 4-C. 資訊查核 或 影片整理
-  if (isFactCheck || isSummary) {
+  // 4-C. 影片整理 (必須包含 YouTube 連結)
+  if (isSummary) {
     if (!isYoutubeUrl(userText)) {
-      const modeName = isFactCheck ? '資訊查核' : '影片整理';
-      replyToLine(replyToken, `⚠️ 請提供有效的 YouTube 連結。例如：\n${modeName} https://youtu.be/...`);
+      replyToLine(replyToken, `⚠️ 請提供有效的 YouTube 連結進行整理。例如：\n影片整理 https://youtu.be/...`);
       return;
     }
 
-    // 抓取 YouTube 影片資訊 (oEmbed)
     let videoContext = userText;
     try {
       const ytRegex = /(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)[\w-]+)/;
@@ -152,7 +167,7 @@ function processMessage(event) {
 - 標題：${oembedData.title}
 - 頻道：${oembedData.author_name}
 - 網址：${videoUrl}
-- 請求模式：${isFactCheck ? '事實查核' : '內容整理'}
+- 請求模式：內容整理
 `;
         }
       }
@@ -160,8 +175,63 @@ function processMessage(event) {
       console.error('Oembed 抓取失敗:', err);
     }
 
-    const analysisReport = callGeminiAPI(videoContext, isFactCheck ? 'FACT_CHECK' : 'SUMMARY');
+    const analysisReport = callGeminiAPI(videoContext, 'SUMMARY');
     if (analysisReport) replyToLine(replyToken, analysisReport);
+    return;
+  }
+
+  // 4-D. 資訊事實查核 (支援 YouTube 影片 或 純文字消息/長輩圖)
+  if (isFactCheck) {
+    let factContext = "";
+    let subjectQuery = "";
+
+    if (isYoutubeUrl(userText)) {
+      // 情況一：YouTube 影片查核
+      try {
+        const ytRegex = /(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)[\w-]+)/;
+        const match = userText.match(ytRegex);
+        if (match) {
+          const videoUrl = match[1];
+          const oembedUrl = 'https://www.youtube.com/oembed?url=' + encodeURIComponent(videoUrl) + '&format=json';
+          const oembedRes = UrlFetchApp.fetch(oembedUrl, { muteHttpExceptions: true });
+          if (oembedRes.getResponseCode() === 200) {
+            const oembedData = JSON.parse(oembedRes.getContentText());
+            subjectQuery = oembedData.title;
+            factContext = `
+# 📥 影片基礎資訊
+- 標題：${oembedData.title}
+- 頻道：${oembedData.author_name}
+- 網址：${videoUrl}
+- 請求模式：事實查核
+`;
+          }
+        }
+      } catch (err) {
+        console.error('Oembed 抓取失敗:', err);
+      }
+    } else {
+      // 情況二：純文字訊息查核
+      subjectQuery = userText.replace(/^(請幫我|幫我|請|麻煩|我想|可以幫我|替我)?(資訊查核|事實查核|影片核實|查核|核實|資訊確認|確認)[\s:：、，。！!？?]*/g, '').trim();
+      if (!subjectQuery) subjectQuery = userText;
+      factContext = `
+# 📥 待查核純文字訊息
+${subjectQuery}
+`;
+    }
+
+    // 進行「免帳號、免 API Key 之深度多方查證」(Cofacts + DuckDuckGo 權威加權 + 深度內文爬取)
+    const verification = getDeepFactCheckContext(subjectQuery || userText);
+    const combinedPrompt = `${factContext}\n\n${verification.contextText}`;
+
+    let analysisReport = callGeminiAPI(combinedPrompt, 'FACT_CHECK');
+    if (analysisReport) {
+      // 程式端保底附加可供使用者親自點擊核實的資料來源網址
+      if (verification.sources && verification.sources.length > 0) {
+        analysisReport += formatCitationFootnote(verification.sources);
+      }
+      replyToLine(replyToken, analysisReport);
+    }
+    return;
   }
 }
 
@@ -250,6 +320,260 @@ function fetchWebPageContext(url) {
 }
 
 /**
+ * 免帳號、免 API Key 之 DuckDuckGo 深度搜尋模組
+ * 抓取前 8 筆結果並進行權威來源加權排序
+ * @param {string} query 搜尋關鍵字
+ * @return {Array<Object>} 排序後的搜尋結果
+ */
+function searchDuckDuckGo(query) {
+  const results = [];
+  try {
+    const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
+    const response = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8'
+      }
+    });
+
+    if (response.getResponseCode() !== 200) return results;
+
+    const html = response.getContentText();
+    // 匹配每個 result__body 區塊
+    const regex = /<div[^>]*class="[^"]*result__body[^"]*"[\s\S]*?<\/div>\s*<\/div>/g;
+    let match;
+
+    while ((match = regex.exec(html)) !== null && results.length < 8) {
+      const block = match[0];
+      const titleMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+      const snippetMatch = block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/);
+
+      if (titleMatch) {
+        let rawUrl = titleMatch[1];
+        let realUrl = rawUrl;
+        const uddgMatch = rawUrl.match(/uddg=([^&]+)/);
+        if (uddgMatch) realUrl = decodeURIComponent(uddgMatch[1]);
+
+        const title = titleMatch[2].replace(/<[^>]+>/g, '').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').trim();
+        const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').trim() : '';
+
+        // 權威來源加權評分
+        let authorityScore = 10;
+        const authorityPatterns = [
+          /tfc-taiwan\.org\.tw/i, // 台灣事實查核中心
+          /mygopen\.com/i,        // MyGoPen
+          /cofacts\.tw/i,         // 真的假的
+          /\.gov\.tw/i,           // 台灣政府機關
+          /mohw\.gov\.tw/i,       // 衛福部
+          /cdc\.gov\.tw/i,        // 疾管署
+          /fda\.gov\.tw/i,        // 食藥署
+          /cna\.com\.tw/i,        // 中央通訊社
+          /twreporter\.org/i,     // 報導者
+          /\.edu\.tw/i            // 大學校院與研究機構
+        ];
+
+        for (const pattern of authorityPatterns) {
+          if (pattern.test(realUrl)) {
+            authorityScore += 50;
+            break;
+          }
+        }
+
+        if (/闢謠|查證|事實查核|假訊息|澄清|謠言|真相/i.test(title + snippet)) {
+          authorityScore += 30;
+        }
+
+        results.push({
+          title: title,
+          url: realUrl,
+          snippet: snippet,
+          score: authorityScore
+        });
+      }
+    }
+
+    // 按權威分數由高至低排序
+    results.sort((a, b) => b.score - a.score);
+  } catch (e) {
+    console.error('DuckDuckGo 搜尋例外:', e);
+  }
+  return results;
+}
+
+/**
+ * 二段式爬取：點入最具權威性的網頁抓取全文 (最長 1500 字)
+ * @param {string} url - 目標網址
+ * @return {string} 乾淨文字內文
+ */
+function fetchDeepPageContent(url) {
+  try {
+    if (!url || !url.startsWith('http')) return "";
+    const response = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      validateHttpsCertificates: false,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0" }
+    });
+
+    if (response.getResponseCode() !== 200) return "";
+    const html = response.getContentText();
+
+    const cleanBody = html.replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav[\s\S]*?<\/nav>/gi, '')
+      .replace(/<header[\s\S]*?<\/header>/gi, '')
+      .replace(/<footer[\s\S]*?<\/footer>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 1500);
+
+    return cleanBody;
+  } catch (e) {
+    return "";
+  }
+}
+
+/**
+ * 查詢「Cofacts 真的假的」闢謠開放資料庫 (完全免費開源 GraphQL)
+ * @param {string} query 查核文字
+ * @return {Object} 包含闢謠資訊摘要與來源網址
+ */
+function queryCofactsApi(query) {
+  let cofactsText = "";
+  let sourceUrl = "";
+  try {
+    const gql = `
+      query SearchArticles($query: String!) {
+        ListArticles(filter: {moreLikeThis: {like: $query}}, first: 2) {
+          edges {
+            node {
+              id
+              text
+              articleReplies {
+                reply {
+                  text
+                  type
+                  reference
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const response = UrlFetchApp.fetch('https://cofacts-api.g0v.tw/graphql', {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ query: gql, variables: { query: query.substring(0, 80) } }),
+      muteHttpExceptions: true
+    });
+
+    if (response.getResponseCode() === 200) {
+      const data = JSON.parse(response.getContentText());
+      const edges = data.data && data.data.ListArticles && data.data.ListArticles.edges;
+      if (edges && edges.length > 0) {
+        let foundReply = false;
+        edges.forEach((edge) => {
+          const replies = edge.node.articleReplies;
+          if (replies && replies.length > 0) {
+            foundReply = true;
+            const r = replies[0].reply;
+            const typeLabel = r.type === 'RUMOR' ? '🔴 含有不實訊息' : r.type === 'NOT_RUMOR' ? '🟢 屬實訊息' : '🟡 含有爭議/個人意見';
+            cofactsText += `【Cofacts 闢謠資料庫精確比對】\n▫️ 查核判定：${typeLabel}\n▫️ 查證內容：${r.text.substring(0, 300)}...\n▫️ 參考出處：${(r.reference || '無附連結').substring(0, 150)}\n\n`;
+
+            if (!sourceUrl && r.reference) {
+              const urlMatch = r.reference.match(/https?:\/\/[^\s]+/);
+              if (urlMatch) sourceUrl = urlMatch[0];
+            }
+            if (!sourceUrl && edge.node.id) {
+              sourceUrl = `https://cofacts.tw/article/${edge.node.id}`;
+            }
+          }
+        });
+        if (foundReply) return { text: cofactsText, sourceUrl: sourceUrl };
+      }
+    }
+  } catch (e) {
+    console.error('Cofacts API 查詢略過:', e);
+  }
+  return { text: "", sourceUrl: "" };
+}
+
+/**
+ * 整合「Cofacts + DuckDuckGo 多筆權威排序 + 二段式深度內文爬取」
+ * @param {string} factQuery - 查核關鍵字或內文
+ * @return {Object} 包含完整的查核背景上下文 (contextText) 與使用者可點擊之來源清單 (sources)
+ */
+function getDeepFactCheckContext(factQuery) {
+  let contextReport = "";
+  const sources = [];
+
+  // 1. 先查 Cofacts 專業闢謠庫
+  const cofactsResult = queryCofactsApi(factQuery);
+  if (cofactsResult.text) {
+    contextReport += cofactsResult.text + "\n";
+    if (cofactsResult.sourceUrl) {
+      sources.push({
+        title: "Cofacts 真的假的闢謠查核",
+        url: cofactsResult.sourceUrl
+      });
+    }
+  }
+
+  // 2. 透過 DuckDuckGo 擴展搜尋 8 筆結果並按權威排序
+  const searchResults = searchDuckDuckGo(factQuery);
+  if (searchResults.length > 0) {
+    contextReport += "【網路多方即時查證來源（按權威度排序）】\n";
+    const topResults = searchResults.slice(0, 5);
+    topResults.forEach((item, idx) => {
+      contextReport += `[來源 ${idx + 1}] ${item.title}\n網址：${item.url}\n摘要：${item.snippet}\n\n`;
+    });
+
+    // 收集前 2 筆權威來源提供給使用者點擊核實
+    searchResults.slice(0, 2).forEach(item => {
+      // 避免重複網址
+      if (!sources.some(s => s.url === item.url)) {
+        sources.push({
+          title: item.title,
+          url: item.url
+        });
+      }
+    });
+
+    // 3. 二段式深度抓取：挑選權威度最高的網頁深入爬取內文
+    const bestSource = searchResults[0];
+    if (bestSource && bestSource.url) {
+      const deepContent = fetchDeepPageContent(bestSource.url);
+      if (deepContent) {
+        contextReport += `【深度內文研讀（取自最佳來源：${bestSource.title}）】\n${deepContent}\n\n`;
+      }
+    }
+  }
+
+  return {
+    contextText: contextReport || "（無相關公開闢謠或即時網路檢索結果，請依照既有專業醫學/科普邏輯進行客觀鑑識）",
+    sources: sources.slice(0, 2) // 最多提供 2 則最佳來源，版面最清爽
+  };
+}
+
+/**
+ * 格式化供使用者親自核實之資料來源註腳
+ * @param {Array<Object>} sources - 來源清單 [{title, url}]
+ * @return {string} 格式化後的文字區塊
+ */
+function formatCitationFootnote(sources) {
+  if (!sources || sources.length === 0) return "";
+  let footnote = "\n\n─────────────────\n🔗 查證依據與核實連結：";
+  sources.forEach(src => {
+    footnote += `\n▫️ ${src.title}：\n${src.url}`;
+  });
+  return footnote;
+}
+
+/**
  * 呼叫 Gemini AI (含自動降級備援機制與 Grounding)
  */
 function callGeminiAPI(userInput, mode = 'FACT_CHECK') {
@@ -285,7 +609,7 @@ function callGeminiAPI(userInput, mode = 'FACT_CHECK') {
 ▫️ 屬性：[專家實拍 / 知識分享 / 內容農場 / 搬運剪輯]
 
 ⚖️ 真實性評估
-▫️ [分析核心建議的正確性與邏輯，並指出是否有行銷誇張化現象]
+▫️ [分析核心建議的正確性與邏輯。若查證資料中包含事實查核中心、MyGoPen 或官方衛生機構之闢謠結論，請具名引述其依據]
 
 🚩 專家結論
 [一句話建議：可作參考但須留意標題誇張 / 專業推薦 / 內容農場 / 錯誤資訊]
@@ -388,12 +712,13 @@ function callGeminiAPI(userInput, mode = 'FACT_CHECK') {
     "muteHttpExceptions": true
   };
 
-  // 定義備援模型清單 (兼顧深度鑑識品質與 LINE Webhook 逾時防護)
+  // 備援模型清單 (最新正式推薦 ➔ 極速防線 ➔ 經典 Flash ➔ 旗艦 Pro)
+  // 依據 Google 官方指示：gemini-2.5-pro 已不對新用戶開放，全面改用 gemini-3 系列！
   const FALLBACK_MODELS = [
-    'gemini-3.7-flash',              // [Tier 1 主力] 最新效能與能力最佳首選，專精事實與詐騙鑑識
-    'gemini-3.6-flash',              // [Tier 2 次主力] 同代同級備援，維持高水準推論品質
-    'gemini-2.5-flash',              // [Tier 4 穩定基石] 跨世代長期穩定保底
-    'gemini-3.1-flash-lite-preview', // [Tier 5 極速防線] 超低延遲極速回應，確保 Webhook 不逾時
+    'gemini-3-flash-preview',        // [Tier 1 主力首選] Google 3 世代標準 Flash，速度極快、推論品質高，新用戶完美支援
+    'gemini-3.1-flash-lite-preview', // [Tier 2 極速防線] 超低延遲極速回應，高 RPM，確保 Webhook 絕不逾時
+    'gemini-2.5-flash',              // [Tier 3 穩定備援] 2.5 系列經典 Flash
+    'gemini-3.1-pro-preview'         // [Tier 4 旗艦備援] 官方官方指定取代 2.5-pro 的旗艦模型，深度推理保底
   ];
 
   let lastErrorDetail = "📌 所有模型均無法連線";
