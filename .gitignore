@@ -4,3 +4,5 @@
 # Skills & Agents
 .agents/
 node_modules/
+skills-lock.json
+docs/
