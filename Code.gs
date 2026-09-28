@@ -19,6 +19,20 @@ const GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('GEMI
 const ENABLE_GROUNDING = false;
 
 /**
+ * 處理 Web 網頁請求 (提供線上圖文說明手冊)
+ */
+function doGet(e) {
+  const htmlContent = typeof renderHelpPageHtml === 'function'
+    ? renderHelpPageHtml()
+    : '<h2>AI 資訊查核助手說明手冊</h2><p>請確認專案中已包含 HelpView.gs。</p>';
+
+  return HtmlService.createHtmlOutput(htmlContent)
+    .setTitle('AI 資訊查核助手｜完整使用指南與指令手冊')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
  * 處理 LINE Webhook
  */
 function doPost(e) {
@@ -57,39 +71,21 @@ function processMessage(event) {
 
   // 2. 指令查詢與使用指南
   if (userText === '指令查詢' || userText === '幫助' || userText === '/help' || userText === 'help') {
-    const helpMsg = `🤖 AI 資訊查核助手｜使用指南
+    const webAppUrl = typeof getWebAppUrl === 'function' ? getWebAppUrl() : (PropertiesService.getScriptProperties().getProperty('WEB_APP_URL') || '');
+    const urlSection = webAppUrl ? `\n\n📖 完整圖文手冊與指令範例：\n${webAppUrl}` : '';
 
-🌟 核心功能說明：
+    const helpMsg = `🤖 AI 資訊查核助手｜快速指南
 
-1️⃣ 即時聯網查證與問答
-▫️ 用法：群組中請輸入 @AI 或 @bot 喚醒機器人
-▫️ 範例：
-  • @AI 2026年中秋節是哪一天？
-  • @bot 明天天氣如何？
-  （系統自動多方聯網搜尋，文末附上核實依據連結 🔗）
-
-2️⃣ 假訊息與謠言事實查核
-▫️ 用法：輸入文字並包含「真的嗎/真的假的/造謠/查核」
-▫️ 範例：
-  • 真的假的？聽說吃菠菜配豆腐會結石？
-  • @AI 請查核這則節能補助簡訊是不是真的
-  （串接 Cofacts 真的假的闢謠庫 與 台灣事實查核中心）
-
-3️⃣ 影片整理與核實
-▫️ 用法：貼上 YouTube 連結 ＋ 需求
-▫️ 範例：
-  • 幫我整理影片大綱 https://youtu.be/...
-  • 查核這部影片有沒有造謠 https://youtu.be/...
-
-4️⃣ 詐騙與可疑網址偵測
-▫️ 用法：貼上網址 ＋ 詢問安全性
-▫️ 範例：
-  • 這個網站有詐騙嗎 https://xxx.shop/...
-
-────────────────
-⚙️ 系統指令：
-• /help 或 指令查詢：查看本說明
-• /get_group_id：查詢群組專屬 ID`;
+🌟 常用核心口訣：
+1️⃣ 聯網問答：輸入 @AI 或 @bot ＋ 提問
+   • 範例：@AI 明天天氣如何？
+2️⃣ 事實查核：貼上文字 ＋ 包含「真的嗎/查核」
+   • 範例：真的假的？吃菠菜配豆腐會結石？
+3️⃣ 影片整理：貼上 YouTube 網址 ＋ 需求
+   • 範例：幫我整理大綱 https://youtu.be/...
+4️⃣ 詐騙偵測：貼上網址 ＋ 詢問安全
+   • 範例：這網站安全嗎 https://...
+5️⃣ 查詢 ID：輸入 /get_group_id${urlSection}`;
     replyToLine(replyToken, helpMsg);
     return;
   }
@@ -284,17 +280,38 @@ function analyzeUrlRisk(url) {
 }
 
 /**
- * 即時抓取網頁內容作為 AI 研判依據
+ * 檢查網址是否為安全的公開 HTTP/HTTPS 網址 (防禦 SSRF 與內部私有位址)
+ */
+function isSafePublicUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') return false;
+    if (host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.')) return false;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 即時抓取網頁內容作為 AI 研判依據 (內建 SSRF 安全防禦)
  * @param {string} url - 待偵測網址
  * @return {string} 網頁標題與內容摘要
  */
 function fetchWebPageContext(url) {
+  if (!isSafePublicUrl(url)) {
+    return "[安全攔截] 該網址不符合安全規範或為內部私有位址。";
+  }
+
   try {
     const response = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
       followRedirects: true,
-      validateHttpsCertificates: false, // 詐騙網站常有憑證問題，強制讀取
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" }
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0" }
     });
 
     const code = response.getResponseCode();
@@ -409,11 +426,10 @@ function searchDuckDuckGo(query) {
  */
 function fetchDeepPageContent(url) {
   try {
-    if (!url || !url.startsWith('http')) return "";
+    if (!url || !isSafePublicUrl(url)) return "";
     const response = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
       followRedirects: true,
-      validateHttpsCertificates: false,
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0" }
     });
 
@@ -464,7 +480,7 @@ function queryCofactsApi(query) {
         }
       }
     `;
-    const response = UrlFetchApp.fetch('https://cofacts-api.g0v.tw/graphql', {
+    const response = UrlFetchApp.fetch('https://api.cofacts.tw/graphql', {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify({ query: gql, variables: { query: query.substring(0, 80) } }),
@@ -772,13 +788,31 @@ function callGeminiAPI(userInput, mode = 'FACT_CHECK') {
 }
 
 /**
+ * LINE 訊息格式安全清洗器：將 AI 可能溢出的 Markdown 標記全數過濾，確保 100% 符合手機端閱讀體驗
+ * @param {string} text - 原始回應文字
+ * @return {string} 清洗後的乾淨純文字
+ */
+function sanitizeForLine(text) {
+  if (!text) return "";
+  return text
+    .replace(/^[#]{1,6}\s*(.+)$/gm, '【$1】')      // 將 # 標題轉換為【標題】
+    .replace(/\*\*([^*]+)\*\*/g, '$1')             // 移除粗體 **
+    .replace(/\*([^*]+)\*/g, '$1')                  // 移除斜體 *
+    .replace(/`([^`]+)`/g, '$1')                    // 移除行內程式碼標記
+    .replace(/^[\s]*[-*_]{3,}[\s]*$/gm, '──────────') // 替換 --- 為 LINE 友善全形分隔線
+    .replace(/^\s*[-+*]\s+/gm, '▫️ ')              // 替換 markdown list 為 ▫️
+    .trim();
+}
+
+/**
  * 回覆訊息給 LINE
  */
 function replyToLine(replyToken, text) {
+  const sanitizedText = sanitizeForLine(text);
   const url = 'https://api.line.me/v2/bot/message/reply';
   const payload = {
     "replyToken": replyToken,
-    "messages": [{ "type": "text", "text": text }]
+    "messages": [{ "type": "text", "text": sanitizedText }]
   };
 
   const options = {

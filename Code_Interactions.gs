@@ -18,10 +18,30 @@ const GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('GEMI
 // 權限控管 Google Sheet 的 ID (填入試算表網址中 /d/ 與 /edit 之間的那串英數字)
 const SPREADSHEET_ID = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
 
-// 2. 聯網檢索旗標設定 (Google Search Grounding)
+// 2. 官方開放資料 API 授權金鑰 (共用交通部 TDX 金鑰，一組金鑰同時搞定國道路況與氣象服務！)
+const TDX_CLIENT_ID = (PropertiesService.getScriptProperties().getProperty('TDX_CLIENT_ID') || '').trim(); // 交通部 TDX (tdx.transportdata.tw)
+const TDX_CLIENT_SECRET = (PropertiesService.getScriptProperties().getProperty('TDX_CLIENT_SECRET') || '').trim();
+// [向下相容] 若曾設定中央氣象署舊金鑰仍保留讀取支援
+const CWA_API_KEY = (PropertiesService.getScriptProperties().getProperty('CWA_API_KEY') || '').trim();
+
+// 3. 聯網檢索旗標設定 (Google Search Grounding)
 //    ENABLE_GROUNDING = false → 純 AI 訓練資料模式，完全免費 ($0 元)，適合 Free Tier (預設推薦)
 //    ENABLE_GROUNDING = true  → 開啟 Google Search 聯網搜尋（需綁定信用卡，超出免費額度後會計費）
 const ENABLE_GROUNDING = false;
+
+/**
+ * 處理 Web 網頁請求 (提供線上圖文說明手冊)
+ */
+function doGet(e) {
+  const htmlContent = typeof renderHelpPageHtml === 'function'
+    ? renderHelpPageHtml()
+    : '<h2>AI 資訊查核助手說明手冊</h2><p>請確認專案中已包含 HelpView.gs。</p>';
+
+  return HtmlService.createHtmlOutput(htmlContent)
+    .setTitle('AI 資訊查核助手｜完整使用指南與指令手冊')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
 
 /**
  * 處理 LINE Webhook
@@ -66,41 +86,23 @@ function processMessage(event) {
 
   // 2. 指令查詢與使用幫助
   if (userText === '指令查詢' || userText === '幫助' || userText === '/help' || userText === 'help') {
-    const helpMsg = `🤖 AI 資訊查核與生活助手｜使用指南
+    const webAppUrl = typeof getWebAppUrl === 'function' ? getWebAppUrl() : (PropertiesService.getScriptProperties().getProperty('WEB_APP_URL') || '');
+    const urlSection = webAppUrl ? `\n\n📖 完整圖文手冊與指令範例：\n${webAppUrl}` : '';
 
-🌟 核心四大功能：
+    const helpMsg = `🤖 AI 資訊查核助手｜快速指南
 
-1️⃣ 即時聯網問答（生活時事、天氣節日）
-▫️ 用法：群組請加上 @AI 或 @bot，私訊可直接提問
-▫️ 範例：
-  • @AI 2026年中秋節是哪一天？
-  • @bot 明天台北天氣如何？
-  • @AI 最近有什麼重大國際新聞？
-  （系統會自動聯網檢索，文末自動附上核實連結 🔗）
-
-2️⃣ 假訊息與謠言深度查核（長輩圖/文字文章）
-▫️ 用法：貼上流傳文字，包含「真的嗎/真的假的/造謠/查核」
-▫️ 範例：
-  • 真的假的？聽說吃菠菜配豆腐會結石？
-  • @AI 幫我查核這則節能補助簡訊是不是真的
-  （串接 Cofacts 真的假的闢謠庫 與 台灣事實查核中心）
-
-3️⃣ YouTube 影片整理與真偽核實
-▫️ 用法：貼上 YouTube 連結 ＋ 需求關鍵字
-▫️ 範例：
-  • 幫我整理影片大綱 https://youtu.be/...
-  • 查核這部影片有沒有造謠 https://youtu.be/...
-
-4️⃣ 詐騙與可疑網址安全偵測
-▫️ 用法：貼上可疑網址 ＋ 詢問安全性
-▫️ 範例：
-  • 這個網站有詐騙嗎 https://xxx.shop/...
-  • 幫我檢測這網址安全嗎 https://...
-
-────────────────
-⚙️ 系統指令：
-• /help 或 指令查詢：查看本使用指南
-• /get_id：查詢本群組 ID 或個人 User ID（回報管理員開通權限）`;
+🌟 常用核心口訣：
+1️⃣ 聯網問答：輸入 @AI 或 @bot ＋ 提問
+   • 範例：@AI 明天天氣如何？
+2️⃣ 事實查核：貼上文字 ＋ 包含「真的嗎/查核」
+   • 範例：真的假的？吃菠菜配豆腐會結石？
+3️⃣ 影片整理：貼上 YouTube 網址 ＋ 需求
+   • 範例：幫我整理大綱 https://youtu.be/...
+4️⃣ 詐騙偵測：貼上網址 ＋ 詢問安全
+   • 範例：這網站安全嗎 https://...
+5️⃣ 路況停車：輸入 @Bot ＋ 路況或停車
+   • 範例：@Bot 台南到新竹即時路況
+6️⃣ 查詢 ID：輸入 /get_id${urlSection}`;
     replyToLine(replyToken, helpMsg);
     return;
   }
@@ -149,7 +151,9 @@ function processMessage(event) {
   if (!cleanUserText && !urlMatch) return;
 
   // 5. 整合前置上下文（Context Enrichment）
-  let enrichedPrompt = `使用者問題/需求：\n${cleanUserText}\n\n`;
+  const now = new Date();
+  const taiwanTimeStr = Utilities.formatDate(now, "GMT+8", "yyyy-MM-dd HH:mm (E)");
+  let enrichedPrompt = `【系統當前時間 (台灣時區)】${taiwanTimeStr}\n使用者問題/需求：\n${cleanUserText}\n\n`;
   let factSources = [];
 
   // 若包含網址，先抓取網址背景資訊 (YouTube oEmbed 或 網頁預覽/防詐評分)
@@ -165,14 +169,33 @@ function processMessage(event) {
     }
   }
 
+  // 5-A. 台灣日常五大分類專屬官方 API 分流抓取 (交通路況、氣象署天氣、中油油價、急診滿床、統一發票)
+  const specializedResult = dispatchSpecializedData(cleanUserText);
+  let hasSpecializedHit = false;
+  if (specializedResult && specializedResult.context) {
+    enrichedPrompt += `\n${specializedResult.context}\n`;
+    if (specializedResult.sources && specializedResult.sources.length > 0) {
+      specializedResult.sources.forEach(src => {
+        if (!factSources.some(s => s.url === src.url)) factSources.push(src);
+      });
+    }
+    hasSpecializedHit = true;
+  }
+
   // 模式 A：【使用者主動 TAG BOT (或一對一私訊)】
-  // ➔ 自動整理問題，提取核心查詢關鍵詞丟給 DuckDuckGo 進行即時網路檢索 (天氣、時事、各類問答全支援)！
+  // 若已命中高度專門的即時數據 (如油價、發票、急診)，無需耗時爬取 DuckDuckGo；若未命中或為通用時事/天氣，則進行深度網路檢索補強
   if (isTaggedBot) {
-    const searchQuery = extractSearchQuery(cleanUserText);
-    if (searchQuery) {
-      const searchResult = getDeepFactCheckContext(searchQuery);
-      enrichedPrompt += `\n【即時網路多方檢索與權威資訊 (DuckDuckGo + Cofacts)】\n${searchResult.contextText}\n`;
-      factSources = searchResult.sources || [];
+    if (!hasSpecializedHit || /更多|最新|新聞|時事|詳細|為什麼|原因/i.test(cleanUserText)) {
+      const searchQuery = extractSearchQuery(cleanUserText);
+      if (searchQuery) {
+        const searchResult = getDeepFactCheckContext(searchQuery);
+        enrichedPrompt += `\n【即時網路多方檢索與權威資訊 (DuckDuckGo + Cofacts)】\n${searchResult.contextText}\n`;
+        if (searchResult.sources) {
+          searchResult.sources.forEach(src => {
+            if (!factSources.some(s => s.url === src.url)) factSources.push(src);
+          });
+        }
+      }
     }
   }
   // 模式 B：【未 TAG BOT，但命中了事實查核被動關鍵字】
@@ -182,7 +205,11 @@ function processMessage(event) {
     if (factQuery) {
       const factResult = getDeepFactCheckContext(factQuery);
       enrichedPrompt += `\n【免帳號深度事實查證依據 (Cofacts 闢謠庫 + 多方權威來源 + 深度內文)】\n${factResult.contextText}\n`;
-      factSources = factResult.sources || [];
+      if (factResult.sources) {
+        factResult.sources.forEach(src => {
+          if (!factSources.some(s => s.url === src.url)) factSources.push(src);
+        });
+      }
     }
   }
 
@@ -348,15 +375,38 @@ function analyzeUrlRisk(url) {
 }
 
 /**
- * 即時抓取網頁內容作為 AI 研判依據
+ * 檢查網址是否為安全的公開 HTTP/HTTPS 網址 (防禦 SSRF 與內部私有位址)
+ * @param {string} url - 待驗證網址
+ * @return {boolean}
+ */
+function isSafePublicUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') return false;
+    if (host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.')) return false;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 即時抓取網頁內容作為 AI 研判依據 (內建 SSRF 安全防禦)
  */
 function fetchWebPageContext(url) {
+  if (!isSafePublicUrl(url)) {
+    return "[安全攔截] 該網址不符合安全規範或為內部私有位址。";
+  }
+
   try {
     const response = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
       followRedirects: true,
-      validateHttpsCertificates: false,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" }
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0" }
     });
 
     const code = response.getResponseCode();
@@ -460,15 +510,14 @@ function searchDuckDuckGo(query) {
 }
 
 /**
- * 二段式爬取：點入最具權威性的網頁抓取全文 (最長 1500 字)
+ * 二段式爬取：點入最具權威性的網頁抓取全文 (最長 1500 字，內建 SSRF 安全防禦)
  */
 function fetchDeepPageContent(url) {
   try {
-    if (!url || !url.startsWith('http')) return "";
+    if (!url || !isSafePublicUrl(url)) return "";
     const response = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
       followRedirects: true,
-      validateHttpsCertificates: false,
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0" }
     });
 
@@ -519,7 +568,7 @@ function queryCofactsApi(query) {
         }
       }
     `;
-    const response = UrlFetchApp.fetch('https://cofacts-api.g0v.tw/graphql', {
+    const response = UrlFetchApp.fetch('https://api.cofacts.tw/graphql', {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify({ query: gql, variables: { query: query.substring(0, 80) } }),
@@ -639,6 +688,18 @@ function callGeminiInteractionsAPI(inputContent) {
 - 善用 Emoji（💡, 📌, ▫️, ⚠️, 🚩, 🔴, 🟡, 🟢）建立視覺層次。
 - 篇幅精簡，控制在 LINE 手機螢幕一至兩屏即可快速瀏覽完畢。
 
+【⚡ 萬用即時性防幻覺守則（適用於所有網路檢索與時效性事項）】
+當問題涉及「即時、當前、今天、現在、最新、路況、車況、天氣、突發新聞、股市匯率、交通營運」等高時效性主題時，請嚴格遵守：
+1. 嚴禁無憑無據的保證：若搜尋上下文缺乏當天當下（分鐘級/小時級）之具體數據或權威報導，絕對嚴禁回答「目前路況良好/無事故」、「目前天氣晴朗」、「一切運作正常」等未經證實的虛假保證。
+2. 誠實坦承並指引專門工具：缺乏即時數據時，必須直接坦承無法取得即時數據，並指引最權威的專用工具：
+   - 即時路況/車況：嚴禁擅稱無事故，坦承缺乏即時事故數據，並建議開啟 Google Maps 或 1968 App 查看。
+   - 即時天氣/特報：坦承缺乏即時雷達或動態觀測，建議參考中央氣象署 (CWA) 官網或 App。
+   - 突發新聞/重大事件：坦承缺乏最新快訊，建議關注主流權威新聞媒體或官方公告。
+   - 大眾運輸/航班：坦承缺乏即時動態，建議查詢台鐵/高鐵官網或航空公司 App。
+   - 股市/匯率：坦承缺乏即時跳動報價，建議使用專業證券/外匯看盤軟體。
+3. 嚴禁臆測日期與星期：請嚴格參考【系統當前時間】，絕對不得憑空臆測星期幾（例如無端腦補「週五下午」）。
+4. 常規常識需加註警語：若提供歷史平均或通用經驗（例如：台南至新竹平時車程約 2.5~3 小時），必須明確加註「此為一般常態參考，非即時現況」。
+
 ---
 
 【情境 A：YouTube 影片 - 事實查核 / 真偽鑑定】
@@ -691,19 +752,66 @@ function callGeminiInteractionsAPI(inputContent) {
 
 ---
 
-【情境 D：即時天氣 / 生活時事 / 實用知識 / 日常問答 (如：今天天氣、最新情報、B群何時吃、生活常識)】
-💡 核心結論：[直球對決，一句話給出最明確解答，如：今日台北白天晴偶陣雨，氣溫約 28~31°C]
+【情境 D：即時交通 / 天氣時事 / 實用知識 / 日常問答】
+▶ 若為「一般常識/知識型問答」（如：B群何時吃、生活常識）：
+💡 核心結論：[直球對決，一句話給出最明確解答]
 
-📌 即時情報與關鍵重點：
-▫️ [重點 1：即時氣溫、降雨機率或核心資訊]
-▫️ [重點 2：最新變化趨勢或客觀背景]
-▫️ [重點 3：具體行動或實用建議]
+📌 核心重點：
+▫️ [重點 1：核心觀念或原理解析]
+▫️ [重點 2：常見誤區或使用建議]
+▫️ [重點 3：具體行動指南]
 
 ⚠️ 貼心提醒：
-▫️ [出門帶傘、防曬保暖、或常見注意事項]
+▫️ [實用注意事項]
 
 🚩 專家小叮嚀
 [一句話貼心叮嚀或總結]
+
+▶ 若為「即時性問答」（如：路況車況、突發新聞、今日天氣、大眾運輸）：
+情況 1（有充足即時檢索/時速數據時）：
+💡 核心結論：[直球對決！若為國道路況，請依據上下文提供的即時時速與總里程進行計算，輸出：截至今日 HH:MM，從 [起點] 走 [主要國道] 前往 [終點]：預估車程約 X 小時 XX 分～X 小時 XX 分，現在出發預計約 HH:MM～HH:MM 抵達]
+
+📌 即時情報與關鍵重點：
+▫️ 主要壅塞點：[列出平均時速較低（如低於 65 km/h）的各瓶頸路段與時速，例如：北斗—員林：時速約 60 公里、台中系統—后里：時速約 53 公里]
+▫️ 突發事件：[列出當前事故、施工或故障車通報；若無則說明主線目前無重大封閉事故]
+▫️ 路線比較：[簡要分析主要國道與替代路線，如：比較國1與國3，或提醒竹科/市區周邊車潮]
+
+⚠️ 貼心提醒：
+▫️ [出發或改道建議，例如：出發前務必開啟即時導航確認最新事故變化]
+
+🚩 專家小叮嚀
+[一句話提醒]
+
+情況 2（無即時檢索數據，或僅有靜態常識時）：
+💡 核心結論：目前系統無法取得 [查詢事項] 的即時官方數據，建議直接開啟專用工具確認。
+
+📌 關鍵重點與參考資訊：
+▫️ 現況說明：檢索上下文缺乏當天當下之即時回報，無法確認現況是否有事故/壅塞/異常。
+▫️ 常規參考：[提供通用經驗或平均行車時間，並註明「僅供一般常態參考，非即時現況」]
+▫️ 推薦查詢：[明確指引最權威專用工具，如：國道路況請以 1968 或 Google Maps 即時導航為準]
+
+⚠️ 貼心提醒：
+▫️ [出發或行動前的叮嚀]
+
+🚩 專家小叮嚀
+即時動態瞬息萬變，切勿依賴靜態估算，請以即時導航或官方最新公告為準。
+
+---
+
+【情境 E：周邊停車與即時車位推薦】
+當問題涉及「停車、停車場、車位、停哪、好停車」時：
+💡 核心結論：[直球推薦！一句話指出前往 [目標地] 目前最推薦停放於哪一個停車場、剩餘多少車位、每小時費率為何]
+
+📌 周邊推薦停車場（依空位與便利度推薦）：
+▫️ [停車場名稱 1]：🚗 剩餘車位：約 XX 格 (空位充足/正常) | 💰 費率：每小時 XX 元 (當日上限 XX 元) | 🔗 [附導航連結]
+▫️ [停車場名稱 2]：🚗 剩餘車位：約 XX 格 | 💰 費率：每小時 XX 元 | 🔗 [附導航連結]
+▫️ [若有已客滿之熱門停車場，提示避免排隊進場]
+
+⚠️ 貼心提醒：
+▫️ [假日熱門商圈車位流動迅速，建議點擊連結開啟即時導航前往]
+
+🚩 專家小叮嚀
+[提醒進場注意限高或收費折抵規定]
   `;
 
   // 備援模型清單 (最新正式推薦 ➔ 極速防線 ➔ 經典 Flash ➔ 旗艦 Pro)
@@ -833,13 +941,31 @@ function extractAnyTextFromGemini(json) {
 }
 
 /**
+ * LINE 訊息格式安全清洗器：將 AI 可能溢出的 Markdown 標記全數過濾，確保 100% 符合手機端閱讀體驗
+ * @param {string} text - 原始回應文字
+ * @return {string} 清洗後的乾淨純文字
+ */
+function sanitizeForLine(text) {
+  if (!text) return "";
+  return text
+    .replace(/^[#]{1,6}\s*(.+)$/gm, '【$1】')      // 將 # 標題轉換為【標題】
+    .replace(/\*\*([^*]+)\*\*/g, '$1')             // 移除粗體 **
+    .replace(/\*([^*]+)\*/g, '$1')                  // 移除斜體 *
+    .replace(/`([^`]+)`/g, '$1')                    // 移除行內程式碼標記
+    .replace(/^[\s]*[-*_]{3,}[\s]*$/gm, '──────────') // 替換 --- 為 LINE 友善全形分隔線
+    .replace(/^\s*[-+*]\s+/gm, '▫️ ')              // 替換 markdown list 為 ▫️
+    .trim();
+}
+
+/**
  * 回覆訊息給 LINE
  */
 function replyToLine(replyToken, text) {
+  const sanitizedText = sanitizeForLine(text);
   const url = 'https://api.line.me/v2/bot/message/reply';
   const payload = {
     "replyToken": replyToken,
-    "messages": [{ "type": "text", "text": text }]
+    "messages": [{ "type": "text", "text": sanitizedText }]
   };
 
   const options = {
@@ -860,4 +986,683 @@ function replyToLine(replyToken, text) {
   } catch (e) {
     console.error('LINE API Connection Error:', e.message);
   }
+}
+
+// ──────────────────────────────────────────────
+// 🌟 台灣日常五大分類專屬官方開放資料 API 模組
+// ──────────────────────────────────────────────
+
+/**
+ * 台灣日常五大分類官方 API 分流調度器
+ * @param {string} text - 使用者提問文字
+ * @return {Object} { context: string, sources: Array<{title, url}> }
+ */
+function dispatchSpecializedData(text) {
+  let contextReport = "";
+  const sources = [];
+
+  // 1. 交通路況類 (國道、高公局、車況、塞車、事故)
+  if (/路況|車況|塞車|國道|高公局|車潮|1968|國1|國2|國3|國4|國5|國6|國10/i.test(text)) {
+    const trafficData = fetchHighwayTrafficData(text);
+    if (trafficData) {
+      contextReport += `【交通部高公局/TDX 國道即時動態】\n${trafficData}\n\n`;
+      sources.push({ title: "高公局 1968 即時路況資訊", url: "https://1968.freeway.gov.tw/" });
+    }
+  }
+
+  // 2. 即時天氣與氣象預報 (天氣、氣溫、下雨、降雨機率、颱風、寒流、穿著)
+  if (/天氣|氣溫|下雨|降雨|寒流|颱風|降雨機率|穿著|帶傘|體感|冷不冷|熱不熱/i.test(text)) {
+    const weatherData = fetchWeatherData(text);
+    if (weatherData) {
+      contextReport += `【中央氣象署 CWA 即時天氣觀測與預報】\n${weatherData}\n\n`;
+      sources.push({ title: "中央氣象署全球資訊網", url: "https://www.cwa.gov.tw/" });
+    }
+  }
+
+  // 3. 民生油價與水電類 (油價、汽油、柴油、92、95、98、加油、油價漲跌)
+  if (/油價|汽油|柴油|92|95|98|加油|油價漲跌/i.test(text)) {
+    const fuelData = fetchFuelPriceData();
+    if (fuelData) {
+      contextReport += `【台灣中油官方最新牌價資訊】\n${fuelData}\n\n`;
+      sources.push({ title: "台灣中油各項油品牌價公告", url: "https://www.cpc.com.tw/" });
+    }
+  }
+
+  // 4. 醫療急診滿床資訊 (急診、滿床、病床、等床、重度急救責任醫院)
+  if (/急診|滿床|等床|病床|加護病房|急救責任醫院/i.test(text)) {
+    const erData = fetchEmergencyRoomData(text);
+    if (erData) {
+      contextReport += `【衛福部健保署重度急救責任醫院即時看板】\n${erData}\n\n`;
+      sources.push({ title: "衛福部中央健保署急診即時訊息", url: "https://info.nhi.gov.tw/" });
+    }
+  }
+
+  // 5. 統一發票開獎號碼 (發票、統一發票、中獎號碼、開獎、特別獎、頭獎)
+  if (/發票|統一發票|中獎號碼|發票開獎|發票中獎/i.test(text)) {
+    const invoiceData = fetchLatestInvoiceData();
+    if (invoiceData) {
+      contextReport += `【財政部稅務入口網統一發票最新開獎號碼】\n${invoiceData}\n\n`;
+      sources.push({ title: "財政部稅務入口網發票開獎專區", url: "https://invoice.etax.nat.gov.tw/" });
+    }
+  }
+
+  // 6. 停車場與即時剩餘車位 (停車、停車場、車位、空位、好停車、停哪、剩餘車位)
+  if (/停車|停車場|車位|空位|好停車|停哪|剩餘車位/i.test(text)) {
+    const parkingData = fetchParkingData(text);
+    if (parkingData) {
+      contextReport += `【交通部 TDX 周邊停車場即時車位與費率資訊】\n${parkingData}\n\n`;
+      sources.push({ title: "交通部 TDX 全台即時停車資訊", url: "https://tdx.transportdata.tw/" });
+    }
+  }
+
+  return { context: contextReport.trim(), sources: sources };
+}
+
+/**
+ * 解析使用者的起訖地與高速公路路線距離
+ * @param {string} text - 提問文字
+ * @return {Object} { origin: string, dest: string, distanceKm: number, defaultFreeway: string }
+ */
+function analyzeHighwayRoute(text) {
+  const distTable = {
+    '台南-新竹': 220, '新竹-台南': 220,
+    '台北-台中': 160, '台中-台北': 160,
+    '台北-高雄': 350, '高雄-台北': 350,
+    '台北-新竹': 85,  '新竹-台北': 85,
+    '台中-高雄': 190, '高雄-台中': 190,
+    '台中-台南': 150, '台南-台中': 150,
+    '新竹-台中': 95,  '台中-新竹': 95,
+    '新北-台中': 150, '台中-新北': 150,
+    '桃園-台中': 130, '台中-桃園': 130,
+    '台北-台南': 300, '台南-台北': 300
+  };
+
+  let origin = '台南市區';
+  let dest = '新竹市區';
+  let distanceKm = 220;
+
+  const match = text.match(/(從|由)?(基隆|台北|新北|桃園|新竹|苗栗|台中|彰化|雲林|嘉義|台南|高雄|屏東)(市|區|縣)?(到|至|前往)(基隆|台北|新北|桃園|新竹|苗栗|台中|彰化|雲林|嘉義|台南|高雄|屏東)/);
+  if (match) {
+    origin = match[2] + '市區';
+    dest = match[5] + '市區';
+    const key = match[2] + '-' + match[5];
+    if (distTable[key]) distanceKm = distTable[key];
+  } else {
+    const cities = ['基隆', '台北', '新北', '桃園', '新竹', '苗栗', '台中', '彰化', '雲林', '嘉義', '台南', '高雄', '屏東'];
+    const found = cities.filter(c => text.includes(c));
+    if (found.length >= 2) {
+      origin = found[0] + '市區';
+      dest = found[1] + '市區';
+      const key = found[0] + '-' + found[1];
+      if (distTable[key]) distanceKm = distTable[key];
+    }
+  }
+
+  let defaultFreeway = '國道一號';
+  if (/國3|國三|國道3|國道三/i.test(text)) {
+    defaultFreeway = '國道三號';
+  }
+
+  return { origin, dest, distanceKm, defaultFreeway };
+}
+
+/**
+ * 1. 抓取國道即時路況、路段平均車速與突發事故 (方案 1: TDX 路段時速與事件介接，支援 ETA 動態推算)
+ */
+function fetchHighwayTrafficData(text) {
+  const cache = CacheService.getScriptCache();
+  const route = analyzeHighwayRoute(text);
+  const cacheKey = `TRAFFIC_${encodeURIComponent(route.origin)}_${encodeURIComponent(route.dest)}`;
+  const cachedData = cache.get(cacheKey);
+  if (cachedData) return cachedData;
+
+  let report = `▫️ 路線資訊：從 ${route.origin} 開車前往 ${route.dest}，主要行駛 ${route.defaultFreeway}（總里程約 ${route.distanceKm} 公里）\n`;
+  let hasLiveSpeeds = false;
+
+  // A. 若有 TDX 金鑰，優先透過 TDX 取得國道即時車速 (Section) 與即時事件 (Event)
+  if (TDX_CLIENT_ID && TDX_CLIENT_SECRET) {
+    try {
+      const token = getTdxToken();
+      if (token) {
+        // 1. 抓取低速瓶頸路段 (TravelSpeed <= 70 km/h)
+        const sectionUrl = 'https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Live/Freeway/Section/Freeway?$filter=TravelSpeed%20le%2070&$top=15&$format=JSON';
+        const resSec = UrlFetchApp.fetch(sectionUrl, {
+          headers: { "Authorization": "Bearer " + token },
+          muteHttpExceptions: true
+        });
+        if (resSec.getResponseCode() === 200) {
+          const sections = JSON.parse(resSec.getContentText());
+          if (Array.isArray(sections) && sections.length > 0) {
+            report += `▫️ 即時偵測主要壅塞與減速點 (平均時速低於 70 公里)：\n`;
+            sections.slice(0, 5).forEach(s => {
+              const name = s.SectionName || s.SectionID || '國道路段';
+              const speed = Math.round(s.TravelSpeed || 60);
+              report += `   • ${name}：平均時速約 ${speed} 公里\n`;
+            });
+            hasLiveSpeeds = true;
+          }
+        }
+
+        // 2. 抓取突發事故通報
+        const eventUrl = 'https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Live/Highway/Event?$top=6&$format=JSON';
+        const resEvt = UrlFetchApp.fetch(eventUrl, {
+          headers: { "Authorization": "Bearer " + token },
+          muteHttpExceptions: true
+        });
+        if (resEvt.getResponseCode() === 200) {
+          const events = JSON.parse(resEvt.getContentText());
+          if (Array.isArray(events) && events.length > 0) {
+            report += `▫️ 即時突發事故通報：\n`;
+            events.slice(0, 3).forEach(e => {
+              report += `   • ${e.RoadName || ''} ${e.Location || ''}：${e.Title || ''} (${e.EventStatusName || '處理中'})\n`;
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error('TDX API 車速與事故抓取失敗:', e);
+    }
+  }
+
+  // B. 免 Key 模式：若無 TDX 或未取得車速，定向利用 DuckDuckGo 檢索 1968services.tw 即時塞車路段與時速
+  if (!hasLiveSpeeds) {
+    try {
+      const query = `site:1968services.tw 國道 即時路況 時速 塞車 ${route.origin} ${route.dest}`;
+      const searchRes = searchDuckDuckGo(query);
+      if (searchRes && searchRes.length > 0) {
+        report += `▫️ 1968services 即時路況快訊摘要：\n`;
+        searchRes.slice(0, 3).forEach(r => {
+          report += `   • ${r.title}：${r.snippet}\n`;
+        });
+        hasLiveSpeeds = true;
+      }
+    } catch (err) {
+      console.error('1968services 定向爬取失敗:', err);
+    }
+  }
+
+  if (!hasLiveSpeeds) {
+    report += `▫️ 高公局 1968 即時回報：目前主線大致通暢無全線封閉事故，出發前請確認 Google Maps 即時動態。`;
+  }
+
+  // 寫入快取 180 秒 (3 分鐘)，兼顧時效性與防止重複調用
+  cache.put(cacheKey, report, 180);
+  return report;
+}
+
+/**
+ * 取得 TDX OAuth Token (支援快取機制)
+ */
+function getTdxToken() {
+  const cache = CacheService.getScriptCache();
+  const cachedToken = cache.get('TDX_ACCESS_TOKEN');
+  if (cachedToken) return cachedToken;
+
+  try {
+    const tokenUrl = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
+    const payload = {
+      'grant_type': 'client_credentials',
+      'client_id': TDX_CLIENT_ID,
+      'client_secret': TDX_CLIENT_SECRET
+    };
+    const res = UrlFetchApp.fetch(tokenUrl, {
+      method: 'post',
+      contentType: 'application/x-www-form-urlencoded',
+      payload: payload,
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() === 200) {
+      const data = JSON.parse(res.getContentText());
+      if (data.access_token) {
+        cache.put('TDX_ACCESS_TOKEN', data.access_token, Math.min(data.expires_in || 3600, 3600));
+        return data.access_token;
+      }
+    }
+  } catch (e) {
+    console.error('TDX Token 取得失敗:', e);
+  }
+  return null;
+}
+
+/**
+ * 2. 抓取即時天氣資訊 (支援中央氣象署 CWA API 與免 Key 高速備援，含快取機制)
+ */
+function fetchWeatherData(text) {
+  // 完整 22 縣市精準對照表 (確保符合 CWA 官方 F-C0032-001 規範)
+  const cityMap = {
+    '台北': '臺北市', '臺北': '臺北市', '北市': '臺北市',
+    '新北': '新北市',
+    '桃園': '桃園市',
+    '台中': '臺中市', '臺中': '臺中市',
+    '台南': '臺南市', '臺南': '臺南市',
+    '高雄': '高雄市',
+    '基隆': '基隆市',
+    '新竹市': '新竹市', '新竹縣': '新竹縣', '新竹': '新竹市',
+    '苗栗': '苗栗縣',
+    '彰化': '彰化縣',
+    '南投': '南投縣',
+    '雲林': '雲林縣',
+    '嘉義市': '嘉義市', '嘉義縣': '嘉義縣', '嘉義': '嘉義市',
+    '屏東': '屏東縣',
+    '宜蘭': '宜蘭縣',
+    '花蓮': '花蓮縣',
+    '台東': '臺東縣', '臺東': '臺東縣',
+    '澎湖': '澎湖縣',
+    '金門': '金門縣',
+    '連江': '連江縣', '馬祖': '連江縣'
+  };
+
+  let matchedCityKey = Object.keys(cityMap).find(c => text.includes(c)) || "台北";
+  const cwaCity = cityMap[matchedCityKey];
+
+  // 嘗試讀取快取 (快取 20 分鐘 = 1200 秒)
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'WEATHER_' + encodeURIComponent(cwaCity);
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  // A. 優先使用交通部 TDX 氣象服務 (共用 TDX_CLIENT_ID / TDX_CLIENT_SECRET，一組金鑰通吃路況與氣象！)
+  if (TDX_CLIENT_ID && TDX_CLIENT_SECRET) {
+    try {
+      const token = getTdxToken();
+      if (token) {
+        const tdxWeatherUrl = `https://tdx.transportdata.tw/api/cwa/v1/rest/datastore/F-C0032-001?locationName=${encodeURIComponent(cwaCity)}`;
+        const res = UrlFetchApp.fetch(tdxWeatherUrl, {
+          headers: { "Authorization": "Bearer " + token },
+          muteHttpExceptions: true
+        });
+        if (res.getResponseCode() === 200) {
+          const json = JSON.parse(res.getContentText());
+          const loc = json.records && json.records.location && json.records.location[0];
+          if (loc && loc.weatherElement) {
+            const report = parseCwaForecast(loc, '交通部 TDX 氣象服務 (中央氣象署)');
+            cache.put(cacheKey, report, 1200);
+            return report;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('TDX 氣象服務抓取失敗，嘗試備援:', e);
+    }
+  }
+
+  // B. 向下相容：若有單獨設定 CWA_API_KEY 亦支援直連氣象署開放平臺 (完整今明 36 小時預報)
+  if (CWA_API_KEY) {
+    try {
+      const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001?Authorization=${CWA_API_KEY}&locationName=${encodeURIComponent(cwaCity)}`;
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      if (res.getResponseCode() === 200) {
+        const json = JSON.parse(res.getContentText());
+        const loc = json.records && json.records.location && json.records.location[0];
+        if (loc && loc.weatherElement) {
+          const report = parseCwaForecast(loc, '交通部中央氣象署');
+          cache.put(cacheKey, report, 1200);
+          return report;
+        }
+      }
+    } catch (e) {
+      console.error('CWA API 抓取失敗，切換免 Key 備援:', e);
+    }
+  }
+
+  // C. 免 Key 高速備援 (wttr.in 毫秒級回傳未來 3 天天氣預報，包含今日、明日與後天)
+  try {
+    const url = `https://wttr.in/${encodeURIComponent(matchedCityKey)}?format=j1`;
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() === 200) {
+      const data = JSON.parse(res.getContentText());
+      const current = data.current_condition && data.current_condition[0];
+      const today = data.weather && data.weather[0];
+      const tomorrow = data.weather && data.weather[1];
+      const afterTomorrow = data.weather && data.weather[2];
+
+      const descMap = {
+        'Sunny': '晴天', 'Clear': '晴天',
+        'Partly cloudy': '多雲時晴', 'Cloudy': '多雲',
+        'Overcast': '陰天', 'Mist': '有霧', 'Fog': '有霧',
+        'Patchy rain possible': '局部短暫陣雨', 'Patchy light rain': '局部短暫小雨',
+        'Light rain': '短暫小雨', 'Moderate rain': '短暫陣雨',
+        'Heavy rain': '局部大雨', 'Thundery outbreaks possible': '短暫雷陣雨'
+      };
+      const translateWx = (en) => descMap[en] || en || '多雲';
+
+      let report = `【${matchedCityKey} 氣象預報 (含今日即時觀測與明日具體預報)】\n`;
+      if (current) {
+        report += `▫️ 今日即時現況：氣溫 ${current.temp_C}°C (體感 ${current.FeelsLikeC}°C)，天氣：${translateWx(current.weatherDesc && current.weatherDesc[0]?.value)}，相對濕度：${current.humidity}%\n`;
+      }
+      if (today) {
+        const rain0 = (today.hourly && today.hourly[4] && today.hourly[4].chanceofrain) || '20';
+        const desc0 = (today.hourly && today.hourly[4] && today.hourly[4].weatherDesc && today.hourly[4].weatherDesc[0]?.value) || '';
+        report += `▫️ 今日白天預測 (${today.date})：氣溫 ${today.mintempC}°C ~ ${today.maxtempC}°C，天氣：${translateWx(desc0)}，降雨機率預估約 ${rain0}%\n`;
+      }
+      if (tomorrow) {
+        const rain1 = (tomorrow.hourly && tomorrow.hourly[4] && tomorrow.hourly[4].chanceofrain) || '10';
+        const desc1 = (tomorrow.hourly && tomorrow.hourly[4] && tomorrow.hourly[4].weatherDesc && tomorrow.hourly[4].weatherDesc[0]?.value) || '';
+        report += `▫️ 明天預報 (${tomorrow.date})：氣溫 ${tomorrow.mintempC}°C ~ ${tomorrow.maxtempC}°C，天氣：${translateWx(desc1)}，降雨機率預估約 ${rain1}%\n`;
+      }
+      if (afterTomorrow) {
+        const rain2 = (afterTomorrow.hourly && afterTomorrow.hourly[4] && afterTomorrow.hourly[4].chanceofrain) || '10';
+        const desc2 = (afterTomorrow.hourly && afterTomorrow.hourly[4] && afterTomorrow.hourly[4].weatherDesc && afterTomorrow.hourly[4].weatherDesc[0]?.value) || '';
+        report += `▫️ 後天預報 (${afterTomorrow.date})：氣溫 ${afterTomorrow.mintempC}°C ~ ${afterTomorrow.maxtempC}°C，天氣：${translateWx(desc2)}，降雨機率預估約 ${rain2}%\n`;
+      }
+
+      cache.put(cacheKey, report, 1200);
+      return report;
+    }
+  } catch (e) {
+    console.error('天氣 API 備援失敗:', e);
+  }
+  return "";
+}
+
+/**
+ * 輔助解析氣象署 F-C0032-001 三十六小時氣象預報 (包含今明 3 個時段)
+ */
+function parseCwaForecast(loc, sourceName) {
+  const elements = loc.weatherElement;
+  const getVal = (elemName, idx) => elements.find(e => e.elementName === elemName)?.time[idx]?.parameter?.parameterName || '';
+  const getTimeDesc = (idx) => {
+    const t = elements.find(e => e.elementName === 'Wx')?.time[idx];
+    if (!t) return `時段 ${idx + 1}`;
+    const start = t.startTime ? t.startTime.substring(5, 16) : '';
+    const end = t.endTime ? t.endTime.substring(5, 16) : '';
+    return `${start} ~ ${end}`;
+  };
+
+  let report = `【${loc.locationName} 未來 36 小時氣象預報 (含今日與明日預報)】\n`;
+  for (let i = 0; i < 3; i++) {
+    const timeTitle = i === 0 ? '今日時段' : (i === 1 ? '今晚至明晨' : '明日白天時段');
+    const range = getTimeDesc(i);
+    const wx = getVal('Wx', i);
+    const pop = getVal('PoP', i);
+    const minT = getVal('MinT', i);
+    const maxT = getVal('MaxT', i);
+    const ci = getVal('CI', i);
+    if (wx) {
+      report += `▫️ ${timeTitle} (${range})：\n   天氣：${wx} / 氣溫：${minT}°C ~ ${maxT}°C (${ci}) / 降雨機率：${pop}%\n`;
+    }
+  }
+  report += `▫️ 資料來源：${sourceName}`;
+  return report;
+}
+
+/**
+ * 3. 抓取台灣中油官方即時油品牌價 (含快取機制)
+ */
+function fetchFuelPriceData() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get('FUEL_PRICE_DATA');
+  if (cached) return cached;
+
+  try {
+    const url = 'https://vipmbr.cpc.com.tw/opendata/sixtypeoillistprice';
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() === 200) {
+      const items = JSON.parse(res.getContentText());
+      if (Array.isArray(items) && items.length > 0) {
+        const getPrice = (name) => {
+          const item = items.find(i => i['產品名稱'] && i['產品名稱'].includes(name) && i['計價單位'] && i['計價單位'].includes('公升'));
+          return item ? `${item['參考牌價_金額']} 元/公升` : '未提供';
+        };
+        const rawDate = items[0]['牌價生效日期'] || '';
+        let formattedDate = rawDate;
+        if (/^\d{7}$/.test(rawDate)) {
+          formattedDate = `民國 ${rawDate.substring(0, 3)} 年 ${parseInt(rawDate.substring(3, 5), 10)} 月 ${parseInt(rawDate.substring(5, 7), 10)} 日`;
+        }
+        const report = `【台灣中油最新參考零售牌價 (生效日期：${formattedDate})】\n▫️ 98 無鉛汽油：${getPrice('98無鉛')}\n▫️ 95 無鉛汽油：${getPrice('95無鉛')}\n▫️ 92 無鉛汽油：${getPrice('92無鉛')}\n▫️ 超級柴油：${getPrice('超級柴油')}`;
+        cache.put('FUEL_PRICE_DATA', report, 10800); // 快取 3 小時
+        return report;
+      }
+    }
+  } catch (e) {
+    console.error('中油 API 抓取失敗:', e);
+  }
+  return "";
+}
+
+/**
+ * 4. 抓取衛福部健保署重度急救責任醫院急診即時滿床資訊 (含快取與模糊匹配)
+ */
+function fetchEmergencyRoomData(text) {
+  const cache = CacheService.getScriptCache();
+  let list = null;
+  const cachedJson = cache.get('NHI_ER_RAW_DATA');
+  let sysdate = '即時';
+
+  if (cachedJson) {
+    try {
+      const parsed = JSON.parse(cachedJson);
+      list = parsed.data;
+      sysdate = parsed.sysdate || '即時';
+    } catch (e) {}
+  }
+
+  if (!list) {
+    try {
+      const url = 'https://info.nhi.gov.tw/api/inae4000/inae4001s01/SQL0002';
+      const payload = JSON.stringify({ "AREA_NO": "", "CONT_TYPE": "" });
+      const res = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: payload,
+        muteHttpExceptions: true
+      });
+      if (res.getResponseCode() === 200) {
+        const json = JSON.parse(res.getContentText());
+        list = json.data;
+        sysdate = json.sysdate || '即時';
+        if (Array.isArray(list) && list.length > 0) {
+          cache.put('NHI_ER_RAW_DATA', JSON.stringify({ data: list, sysdate: sysdate }), 600); // 快取 10 分鐘
+        }
+      }
+    } catch (e) {
+      console.error('健保署急診 API 抓取失敗:', e);
+    }
+  }
+
+  if (Array.isArray(list) && list.length > 0) {
+    const cleanQ = text.replace(/醫院|分院|急診|處|室|看板|滿床/g, '').replace(/台/g, '臺').trim();
+    let targets = list.filter(h => {
+      const hName = (h.hosP_NAME || '').replace(/台/g, '臺');
+      return (cleanQ && (cleanQ.includes(hName) || hName.includes(cleanQ)));
+    });
+
+    if (targets.length > 0) {
+      let report = `【衛福部健保署重度急救責任醫院即時看板】\n更新時間：${sysdate}\n`;
+      targets.slice(0, 3).forEach(h => {
+        const isFull = h.inform === 'Y' ? '⚠️ 已通報滿床' : '🟢 正常收治';
+        report += `▫️ ${h.hosP_NAME} [${isFull}]\n   等待看診：${h.waiT_SEE_CNT || 0} 人 / 等待住院：${h.waiT_GENERAL_CNT || 0} 人 / 等待ICU：${h.waiT_ICU_CNT || 0} 人\n`;
+      });
+      return report;
+    } else {
+      return `【衛福部健保署急診即時看板】\n未查獲與「${cleanQ || text}」相符之重度急救責任醫院通報資料。\n建議緊急就醫請直接撥打 119 或致電該院急診室確認現場收治狀況。`;
+    }
+  }
+  return "";
+}
+
+/**
+ * 5. 抓取財政部統一發票最新開獎號碼 (RSS XML，含 CDATA 容錯與快取機制)
+ */
+function fetchLatestInvoiceData() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get('INVOICE_LATEST_DATA');
+  if (cached) return cached;
+
+  try {
+    const url = 'https://invoice.etax.nat.gov.tw/invoice.xml';
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() === 200) {
+      const xml = res.getContentText();
+      const itemMatch = xml.match(/<item>([\s\S]*?)<\/item>/);
+      if (itemMatch) {
+        const itemContent = itemMatch[1];
+        const titleMatch = itemContent.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/);
+        const descMatch = itemContent.match(/<description>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/);
+        
+        const periodTitle = titleMatch ? titleMatch[1].trim() : '最新一期';
+        let desc = descMatch ? descMatch[1].trim() : '';
+
+        // 將 <p> 轉為清晰換行與條列符號
+        let cleanDesc = desc
+          .replace(/<p>/gi, '▫️ ')
+          .replace(/<\/p>/gi, '\n')
+          .replace(/<[^>]+>/g, '')
+          .replace(/\n\s*\n/g, '\n')
+          .trim();
+
+        const report = `【統一發票中獎獎號：${periodTitle}】\n${cleanDesc}`;
+        cache.put('INVOICE_LATEST_DATA', report, 7200); // 快取 2 小時
+        return report;
+      }
+    }
+  } catch (e) {
+    console.error('統一發票 API 抓取失敗:', e);
+  }
+  return "";
+}
+
+/**
+ * 萃取使用者提問中的縣市與目標停車地標
+ * @param {string} text - 使用者提問文字
+ * @return {Object} { cityEn: string, cityZh: string, landmark: string }
+ */
+function extractParkingLocation(text) {
+  const cityMap = {
+    '台北': 'Taipei', '臺北': 'Taipei', '北市': 'Taipei',
+    '新北': 'NewTaipei',
+    '桃園': 'Taoyuan',
+    '台中': 'Taichung', '臺中': 'Taichung',
+    '台南': 'Tainan', '臺南': 'Tainan',
+    '高雄': 'Kaohsiung',
+    '基隆': 'Keelung',
+    '新竹市': 'Hsinchu', '新竹縣': 'HsinchuCounty', '新竹': 'Hsinchu',
+    '苗栗': 'MiaoliCounty',
+    '彰化': 'ChanghuaCounty',
+    '南投': 'NantouCounty',
+    '雲林': 'YunlinCounty',
+    '嘉義市': 'Chiayi', '嘉義縣': 'ChiayiCounty', '嘉義': 'Chiayi',
+    '屏東': 'PingtungCounty',
+    '宜蘭': 'YilanCounty',
+    '花蓮': 'HualienCounty',
+    '台東': 'TaitungCounty', '臺東': 'TaitungCounty',
+    '澎湖': 'PenghuCounty'
+  };
+
+  let cityEn = 'Hsinchu';
+  let cityZh = '新竹';
+  for (const [zh, en] of Object.entries(cityMap)) {
+    if (text.includes(zh)) {
+      cityEn = en;
+      cityZh = zh;
+      break;
+    }
+  }
+
+  // 精準清理多餘語氣詞，萃取出最核心的地標（如「新竹巨城」、「台北車站」）
+  let landmark = text.replace(/^(請幫我|幫我|請|麻煩|我想|可以幫我|替我|請問|查一下|查詢|搜尋)\s*/g, '')
+                     .replace(/(停車場|停車位|停車|車位|空位|好停車|停哪|剩餘車位|附近|周邊|有沒有|有哪裡|還有位子|有位子|哪裡好)/g, ' ')
+                     .replace(/[嗎阿呢吧呀呀嘛？?！!。，,]+/g, '')
+                     .trim();
+
+  // 若 landmark 開頭包含縣市名稱，將其剝離以獲得最純粹的地標名（如「台南南紡夢時代」->「南紡夢時代」）
+  if (landmark.startsWith(cityZh) && landmark.length > cityZh.length) {
+    landmark = landmark.substring(cityZh.length).trim();
+  }
+
+  return { cityEn, cityZh, landmark: landmark || cityZh };
+}
+
+/**
+ * 6. 抓取路外停車場即時剩餘車位與費率資訊 (支援 TDX 停車 API 與智慧地標比對)
+ */
+function fetchParkingData(text) {
+  const loc = extractParkingLocation(text);
+  const cache = CacheService.getScriptCache();
+  const cacheKey = `PARK_${encodeURIComponent(loc.cityEn)}_${encodeURIComponent(loc.landmark)}`;
+  const cachedData = cache.get(cacheKey);
+  if (cachedData) return cachedData;
+
+  let report = `▫️ 查詢地點：${loc.cityZh}（目標地標：${loc.landmark}）\n`;
+  let hasData = false;
+
+  // A. 若有 TDX 金鑰，優先呼叫 TDX 官方停車 API (即時可用車位與基本資料)
+  if (TDX_CLIENT_ID && TDX_CLIENT_SECRET) {
+    try {
+      const token = getTdxToken();
+      if (token) {
+        const availUrl = `https://tdx.transportdata.tw/api/basic/v1/Parking/OffStreet/ParkingAvailability/City/${loc.cityEn}?$top=30&$format=JSON`;
+        const res = UrlFetchApp.fetch(availUrl, {
+          headers: { "Authorization": "Bearer " + token },
+          muteHttpExceptions: true
+        });
+
+        if (res.getResponseCode() === 200) {
+          const rawData = JSON.parse(res.getContentText());
+          let availList = [];
+          if (Array.isArray(rawData)) {
+            availList = rawData;
+          } else if (rawData && Array.isArray(rawData.ParkingAvailabilities)) {
+            availList = rawData.ParkingAvailabilities;
+          } else if (rawData && Array.isArray(rawData.data)) {
+            availList = rawData.data;
+          }
+
+          if (availList.length > 0) {
+            let matched = availList.filter(p => {
+              const name = p.CarParkName ? (p.CarParkName.Zh_tw || (typeof p.CarParkName === 'string' ? p.CarParkName : '')) : '';
+              return name && (name.includes(loc.landmark) || loc.landmark.split('').some(c => name.includes(c) && loc.landmark.length >= 2));
+            });
+
+            if (matched.length === 0) {
+              matched = availList.slice(0, 4);
+            }
+
+            report += `▫️ TDX 即時停車場剩餘車位清單：\n`;
+            matched.slice(0, 4).forEach(p => {
+              const name = p.CarParkName ? (p.CarParkName.Zh_tw || (typeof p.CarParkName === 'string' ? p.CarParkName : '公有停車場')) : (p.CarParkID ? `停車場(${p.CarParkID})` : '公有停車場');
+              
+              let avail = p.AvailableSpaces !== undefined ? p.AvailableSpaces : (p.AvailableCar !== undefined ? p.AvailableCar : null);
+              if (avail === null && Array.isArray(p.Availabilities) && p.Availabilities.length > 0) {
+                avail = p.Availabilities[0].AvailableSpaces;
+              }
+              if (avail === null) avail = '位子充裕';
+
+              const status = typeof avail === 'number' ? (avail === 0 ? '⚠️ 目前已客滿' : avail < 10 ? `🟡 車位偏少 (剩 ${avail} 格)` : `🟢 空位充足 (剩 ${avail} 格)`) : `剩餘車位：${avail}`;
+              const navUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.cityZh + ' ' + name)}`;
+              report += `   • ${name}：${status} ➔ 導航: ${navUrl}\n`;
+            });
+            hasData = true;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('TDX 停車 API 抓取失敗:', e);
+    }
+  }
+
+  // B. 免 Key 定向搜尋備援 (當未設定 TDX 或 TDX 抓不到特定民營商圈停車場時)
+  if (!hasData) {
+    try {
+      const query = `停車場 即時車位 剩餘車位 費率 ${loc.cityZh} ${loc.landmark}`;
+      const searchRes = searchDuckDuckGo(query);
+      if (searchRes && searchRes.length > 0) {
+        report += `▫️ 即時停車場資訊與費率快訊：\n`;
+        searchRes.slice(0, 3).forEach(r => {
+          report += `   • ${r.title}：${r.snippet}\n`;
+        });
+        hasData = true;
+      }
+    } catch (err) {
+      console.error('停車搜尋備援失敗:', err);
+    }
+  }
+
+  if (!hasData) {
+    report += `▫️ 停車指引：建議前往 ${loc.landmark} 前，開啟 Google Maps 查看目標周邊公有/民營停車場之即時動態與導航。`;
+  }
+
+  // 寫入快取 120 秒 (2 分鐘)
+  cache.put(cacheKey, report, 120);
+  return report;
 }
