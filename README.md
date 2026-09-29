@@ -196,7 +196,7 @@
 
 ### 第一步：基礎環境準備
 
-1. 前往 [LINE Developers](https://developers.line.biz/) 建立 Channel，取得 `Channel Access Token`（詳見 [詳細設定指南](./deployment_guide.md)）。
+1. 前往 [LINE Developers Messaging API](https://developers.line.biz/en/services/messaging-api/) 建立 Channel（點擊「Start now」登入建立），取得 `Channel Access Token`（詳見 [詳細設定指南](./deployment_guide.md)）。
 2. 前往 [Google AI Studio](https://aistudio.google.com/) 取得 `Gemini API Key`（詳見 [詳細設定指南](./deployment_guide.md)）。
 3. *(選填，推薦)* 前往 [交通部 TDX 平臺](https://tdx.transportdata.tw/) 免費申請會員，取得 `Client ID` 與 `Client Secret`（**一組金鑰搞定國道即時車速與全台路外停車位**）。
 
