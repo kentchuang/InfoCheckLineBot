@@ -1,6 +1,6 @@
 /**
  * AI 資訊查核助手 LINE Bot (Interactions API 智能版)
- * 版別：v2026.09.28.01-interactions-deep-search
+ * 版別：v2026.09.28.02-interactions-invoice-fix
  * 部署環境: Google Apps Script (GAS)
  *
  * [架構設計說明]
@@ -138,8 +138,9 @@ function processMessage(event) {
   const hasPassiveSummary = passiveSummaryKws.some(kw => userText.includes(kw));
   const hasPassiveScam = passiveScamKws.some(kw => userText.includes(kw));
 
-  // 若使用者「沒有 TAG 機器人」，且「沒有網址」，且「未命中被動關鍵字」：保持完全靜默
-  if (!isTaggedBot && !urlMatch && !hasPassiveFact && !hasPassiveSummary && !hasPassiveScam) {
+  // 若在群組或多人聊天室中：必須「主動 TAG/提及機器人」或「命中被動關鍵字」才觸發
+  // 避免群組成員日常分享連結或一般閒聊時被機器人過度干擾打擾
+  if (!isDirectChat && !isTaggedBot && !hasPassiveFact && !hasPassiveSummary && !hasPassiveScam) {
     return;
   }
 
@@ -183,9 +184,11 @@ function processMessage(event) {
   }
 
   // 模式 A：【使用者主動 TAG BOT (或一對一私訊)】
-  // 若已命中高度專門的即時數據 (如油價、發票、急診)，無需耗時爬取 DuckDuckGo；若未命中或為通用時事/天氣，則進行深度網路檢索補強
+  // 若已命中高度專門的即時數據 (如發票、油價、停車、急診、交通)，無須額外爬取 DuckDuckGo 與 Cofacts 闢謠庫，避免雜訊干擾
+  // 僅在「未命中專屬數據」或「使用者明確提出質疑、查證、謠言、新聞原因」時才進行深度網路檢索
   if (isTaggedBot) {
-    if (!hasSpecializedHit || /更多|最新|新聞|時事|詳細|為什麼|原因/i.test(cleanUserText)) {
+    const isSeekingFactCheckOrNews = /真的假的|真假|假訊息|假消息|謠言|闢謠|騙人|詐騙|新聞|時事|為什麼|原因|內幕|背景/i.test(cleanUserText);
+    if (!hasSpecializedHit || isSeekingFactCheckOrNews) {
       const searchQuery = extractSearchQuery(cleanUserText);
       if (searchQuery) {
         const searchResult = getDeepFactCheckContext(searchQuery);
@@ -213,14 +216,22 @@ function processMessage(event) {
     }
   }
 
-  // 6. 呼叫 Interactions API（由 AI 自行判斷意圖並產生適合 LINE 的排版）
-  let result = callGeminiInteractionsAPI(enrichedPrompt);
-  if (result) {
-    // 若有檢索到的權威網頁資料來源，程式端保底附加可供使用者親自核實的連結
-    if (factSources.length > 0) {
-      result += formatCitationFootnote(factSources);
+  // 6. 呼叫 Interactions API（由 AI 自行判斷意圖，輸出極簡「燈號 + 最終結論」）
+  const aiResponse = callGeminiInteractionsAPI(enrichedPrompt);
+  if (aiResponse && aiResponse.text) {
+    let finalMessage = aiResponse.text.trim();
+
+    // 若有需求時附上求證連結 (精簡出處)
+    if (factSources && factSources.length > 0) {
+      finalMessage += formatCitationFootnote(factSources);
     }
-    replyToLine(replyToken, result);
+
+    // 附上判別回應模型資訊
+    if (aiResponse.model) {
+      finalMessage += `\n\n🤖 模型：${aiResponse.model}`;
+    }
+
+    replyToLine(replyToken, finalMessage);
   }
 }
 
@@ -338,14 +349,87 @@ function fetchYoutubeInfo(videoUrl) {
 }
 
 /**
+ * 安全解析 URL (相容 Google Apps Script 環境，避免 WHATWG URL 不存在拋錯)
+ * @param {string} url - 待解析網址
+ * @return {Object|null}
+ */
+function parseUrlSafe(url) {
+  if (!url || typeof url !== 'string') return null;
+  const match = url.trim().match(/^(https?:)\/\/([^\/?#:]+)(?::\d+)?(\/[^?#]*)?(?:\?([^#]*))?(?:#(.*))?$/i);
+  if (!match) return null;
+  return {
+    protocol: match[1].toLowerCase(),
+    hostname: match[2].toLowerCase(),
+    pathname: match[3] || '/',
+    search: match[4] ? ('?' + match[4]) : '',
+    searchParamsString: match[4] ? match[4].toLowerCase() : '',
+    hash: match[5] || ''
+  };
+}
+
+/**
+ * 檢查是否為官方認證/知名信任網域 (白名單)
+ * @param {string} hostname
+ * @return {boolean}
+ */
+function isTrustedDomain(hostname) {
+  if (!hostname) return false;
+  const h = hostname.toLowerCase();
+
+  // 1. 政府與教育機構
+  if (h.endsWith('.gov.tw') || h.endsWith('.edu.tw')) return true;
+
+  // 2. 知名電商與官方短網址
+  const trustedECommerce = [
+    'shopee.tw', 'shp.ee', 'tw.shp.ee',
+    'momo.dm', 'momoshop.com.tw',
+    'pchome.com.tw', '24h.pchome.com.tw',
+    'books.com.tw', 'benefit.books.com.tw',
+    'yahoo.com.tw', 'tw.bid.yahoo.com', 'tw.buy.yahoo.com',
+    'etmall.com.tw', 'u-mall.com.tw', 'pcone.com.tw'
+  ];
+  if (trustedECommerce.some(domain => h === domain || h.endsWith('.' + domain))) return true;
+
+  // 3. 官方超商與電子票券/數位禮券平台 (如 i禮讚、Ticket Xpress)
+  const trustedGifts = [
+    'ibon.com.tw', '7-11.com.tw', 'citycafe.com.tw', 'openpoint.com.tw',
+    'ibongift.com', // 統一超商 (安源資訊 i禮讚) 官方數位票券平台
+    'edenred.tw', 'ticketexpress.tw', // 宜睿智慧 Ticket Xpress
+    'checkin.131.com.tw', 'gift.131.com.tw',
+    'ticket.com.tw'
+  ];
+  if (trustedGifts.some(domain => h === domain || h.endsWith('.' + domain))) return true;
+
+  // 4. 知名社群與通用官方跳轉
+  const trustedSocial = [
+    'line.me', 'lin.ee', 'page.line.me',
+    'facebook.com', 'fb.me', 'fb.com',
+    'instagram.com', 'threads.net',
+    'youtube.com', 'youtu.be',
+    'google.com', 'google.com.tw', 'goo.gl', 'g.co'
+  ];
+  if (trustedSocial.some(domain => h === domain || h.endsWith('.' + domain))) return true;
+
+  return false;
+}
+
+/**
  * 詐騙網址靜態風險評分
+ * @param {string} url - 待檢測網址
+ * @return {number} riskScore - 風險點數 (70 分以上為高風險)
  */
 function analyzeUrlRisk(url) {
   let riskScore = 0;
   try {
-    const urlObj = new URL(url);
-    const hostname = urlObj.hostname.toLowerCase();
-    const searchParams = urlObj.search.toLowerCase();
+    const parsed = parseUrlSafe(url);
+    if (!parsed) return 50;
+    const hostname = parsed.hostname;
+    const searchParams = parsed.searchParamsString;
+
+    // A. 命中官方信任白名單，且無山寨特徵，直接評定為 0 分安全
+    if (isTrustedDomain(hostname)) {
+      return 0;
+    }
 
     // 1. 高風險 TLD (+40)
     const riskyTlds = ['.shop', '.top', '.xyz', '.vip', '.site', '.cc', '.fun', '.online', '.buzz', '.click', '.link'];
@@ -369,7 +453,7 @@ function analyzeUrlRisk(url) {
     if (fakeBrands.some(fb => hostname.includes(fb))) riskScore += 60;
 
   } catch (e) {
-    console.log('URL 解析錯誤: ' + url);
+    console.log('URL 分析異常: ' + e.message);
   }
   return riskScore;
 }
@@ -380,41 +464,65 @@ function analyzeUrlRisk(url) {
  * @return {boolean}
  */
 function isSafePublicUrl(url) {
-  if (!url || typeof url !== 'string') return false;
-  try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
-    const host = parsed.hostname.toLowerCase();
-    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') return false;
-    if (host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.')) return false;
-    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
-    return true;
-  } catch (e) {
-    return false;
-  }
+  const parsed = parseUrlSafe(url);
+  if (!parsed) return false;
+  if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+  const host = parsed.hostname;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') return false;
+  if (host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.')) return false;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+  return true;
 }
 
 /**
- * 即時抓取網頁內容作為 AI 研判依據 (內建 SSRF 安全防禦)
+ * 即時抓取網頁內容作為 AI 研判依據 (內建 SSRF 安全防禦與關鍵資安特徵偵測)
  */
 function fetchWebPageContext(url) {
   if (!isSafePublicUrl(url)) {
-    return "[安全攔截] 該網址不符合安全規範或為內部私有位址。";
+    return "[安全攔截] 該網址為內部私有 IP 或非公開 HTTP/HTTPS 位址。";
   }
+
+  const parsed = parseUrlSafe(url);
+  const isTrusted = parsed && isTrustedDomain(parsed.hostname);
 
   try {
     const response = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
       followRedirects: true,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0" }
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" }
     });
 
     const code = response.getResponseCode();
-    if (code !== 200) return `[無法正常存取] 伺服器回傳狀態碼：${code}`;
+    if (code !== 200) {
+      if (code === 403 || code === 401) {
+        return `[存取受限] 伺服器狀態碼 ${code}（目標站台具備反爬蟲機制或為手機 App 專屬連結）。${isTrusted ? '此網域屬於官方信任平台。' : ''}`;
+      }
+      return `[無法正常存取] 伺服器回傳狀態碼：${code}`;
+    }
 
     const html = response.getContentText();
     const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : "無標題";
+
+    // 特徵鑑識 (辨識釣魚表單 vs 官方 APP 整合)
+    const features = [];
+    if (isTrusted) {
+      features.push("✅ 官方認證網域/合法知名服務商架構");
+    }
+
+    // 檢查是否有要求輸入高危敏感資訊的表單欄位
+    const sensitiveInputs = [];
+    if (/(creditcard|card.?num|cvv|cvc|安全碼|有效月年|信用卡號)/i.test(html)) sensitiveInputs.push("信用卡資訊");
+    if (/(網銀密碼|銀行密碼|提款密碼|轉帳密碼)/i.test(html)) sensitiveInputs.push("網路銀行密碼");
+    if (/(otp|手機動態碼)/i.test(html) && !/(turnstile|recaptcha|hcaptcha)/i.test(html)) sensitiveInputs.push("動態簡訊驗證碼");
+    if (sensitiveInputs.length > 0 && !isTrusted) {
+      features.push(`⚠️ 頁面包含敏感輸入表單：${sensitiveInputs.join('、')}`);
+    }
+
+    // 檢查是否有官方 App 深層連結 (Deep Link)
+    if (/(uniopenapp\.page\.link|shopeetw:\/\/|line:\/\/|openpoint)/i.test(html)) {
+      features.push("🔗 整合官方 App 深度跳轉/歸戶機制");
+    }
 
     const cleanBody = html.replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -423,9 +531,14 @@ function fetchWebPageContext(url) {
       .trim()
       .substring(0, 1200);
 
-    return `標題：${title}\n內容預覽：${cleanBody}`;
+    let resultContext = `標題：${title}\n`;
+    if (features.length > 0) {
+      resultContext += `特徵辨識：${features.join(' | ')}\n`;
+    }
+    resultContext += `內容預覽：${cleanBody}`;
+    return resultContext;
   } catch (e) {
-    return `[存取失敗] 原因：${e.message}`;
+    return `[存取受限] 無法擷取網頁內文（${e.message}）。${isTrusted ? '此網域屬於官方信任平台。' : ''}`;
   }
 }
 
@@ -659,15 +772,15 @@ function getDeepFactCheckContext(factQuery) {
 }
 
 /**
- * 格式化供使用者親自核實之資料來源註腳
+ * 格式化供使用者親自核實之資料來源註腳 (精簡版)
  * @param {Array<Object>} sources - 來源清單 [{title, url}]
  * @return {string} 格式化後的文字區塊
  */
 function formatCitationFootnote(sources) {
   if (!sources || sources.length === 0) return "";
-  let footnote = "\n\n─────────────────\n🔗 查證依據與核實連結：";
-  sources.forEach(src => {
-    footnote += `\n▫️ ${src.title}：\n${src.url}`;
+  let footnote = "\n\n🔗 求證連結：";
+  sources.slice(0, 2).forEach(src => {
+    footnote += `\n▫️ ${src.title}：${src.url}`;
   });
   return footnote;
 }
@@ -676,142 +789,35 @@ function formatCitationFootnote(sources) {
  * 呼叫 Gemini Interactions API (統一 Agent 提示詞 + Web Search 工具支援 + 多模型降級)
  */
 function callGeminiInteractionsAPI(inputContent) {
-  // 統整型 Agent 指示詞：由 AI 自主根據輸入內容判定意圖並選擇最適格式輸出
+  // 統整型 Agent 指示詞：由 AI 自主根據輸入內容判定意圖，極簡輸出「燈號 + 最終結論」
   const UNIFIED_AGENT_INSTRUCTION = `
-你是一位具備資安防護、事實查核與生活知識顧問能力的「全方位數位生活與鑑識 AI 助手」。
-請根據使用者提供的內容與問題，自動判斷核心意圖，並嚴格依照專為 LINE 手機端設計的格式輸出：
+你是一位具備資安鑑識、事實查核與生活知識顧問能力的「專業 AI 助手」。
+使用者需要「極致精簡、直球對決」的回答，絕對嚴禁贅字與冗長條列。
 
-【通用排版與限制守則】
-- 嚴禁使用 Markdown 語法（絕對禁止 #, ##, **, ---, \` 等標記符號，直接輸出乾淨文字）。
-- 一律使用繁體中文。
-- 結論先行：手機螢幕有限，最重要的核心解答必須放在第一段。
-- 善用 Emoji（💡, 📌, ▫️, ⚠️, 🚩, 🔴, 🟡, 🟢）建立視覺層次。
-- 篇幅精簡，控制在 LINE 手機螢幕一至兩屏即可快速瀏覽完畢。
+【格式輸出最高準則：只要 燈號/圖示 + 最終結論】
+1. 嚴禁 Markdown 語法（絕對禁止 #, ##, **, ---, \` 等標記符號，直接輸出乾淨純文字）。
+2. 一律使用繁體中文。
+3. 嚴禁展開長篇大論、嚴禁分段條列、嚴禁背景陳述。每則回覆務必於 1~3 句話內直球說清最終結論。
 
-【⚡ 萬用即時性防幻覺守則（適用於所有網路檢索與時效性事項）】
-當問題涉及「即時、當前、今天、現在、最新、路況、車況、天氣、突發新聞、股市匯率、交通營運」等高時效性主題時，請嚴格遵守：
-1. 嚴禁無憑無據的保證：若搜尋上下文缺乏當天當下（分鐘級/小時級）之具體數據或權威報導，絕對嚴禁回答「目前路況良好/無事故」、「目前天氣晴朗」、「一切運作正常」等未經證實的虛假保證。
-2. 誠實坦承並指引專門工具：缺乏即時數據時，必須直接坦承無法取得即時數據，並指引最權威的專用工具：
-   - 即時路況/車況：嚴禁擅稱無事故，坦承缺乏即時事故數據，並建議開啟 Google Maps 或 1968 App 查看。
-   - 即時天氣/特報：坦承缺乏即時雷達或動態觀測，建議參考中央氣象署 (CWA) 官網或 App。
-   - 突發新聞/重大事件：坦承缺乏最新快訊，建議關注主流權威新聞媒體或官方公告。
-   - 大眾運輸/航班：坦承缺乏即時動態，建議查詢台鐵/高鐵官網或航空公司 App。
-   - 股市/匯率：坦承缺乏即時跳動報價，建議使用專業證券/外匯看盤軟體。
-3. 嚴禁臆測日期與星期：請嚴格參考【系統當前時間】，絕對不得憑空臆測星期幾（例如無端腦補「週五下午」）。
-4. 常規常識需加註警語：若提供歷史平均或通用經驗（例如：台南至新竹平時車程約 2.5~3 小時），必須明確加註「此為一般常態參考，非即時現況」。
+【各情境燈號與結論標準】
+▶ 情境 1：網址資安偵測（詐騙、釣魚、可疑連結）
+- 燈號：🟢 官方安全連結 / 🟡 中風險需留意 / 🔴 高風險詐騙
+- 格式：[燈號] [核心結論：說明是否為官方正規網址/跳轉，是否有索取信用卡或帳密風險，告訴使用者該怎麼做]
 
----
+▶ 情境 2：訊息或謠言事實查核（長輩圖、謠傳、時事真偽）
+- 燈號：🔴 錯誤謠言 / 🟡 部分不實(存疑) / 🟢 屬實訊息
+- 格式：[燈號] [核心結論：1~2 句話直球指出事實真相與科學依據]
 
-【情境 A：YouTube 影片 - 事實查核 / 真偽鑑定】
-燈號說明：🔴 高風險(造謠/詐騙) / 🟡 中風險(標題黨/非專業) / 🟢 低風險(權威/專業)
-[燈號] 核心摘要：[一句話總結：區分行銷風格與內容實質]
+▶ 情境 3：影片重點摘要 / 筆記
+- 圖示：📝 重點精華
+- 格式：📝 重點精華：[2~3 句話總結全片最核心論點與重點]
 
-🤖 AI 鑑定 (參與度：XX%)
-▫️ 特徵：[區分是 AI 輔助製作還是純 AI 生成]
-▫️ 屬性：[專家實拍 / 知識分享 / 內容農場 / 搬運剪輯]
-
-⚖️ 真實性評估
-▫️ [分析核心建議的正確性與邏輯]
-
-🚩 專家結論
-[一句話建議：可作參考但須留意標題誇張 / 專業推薦 / 內容農場 / 錯誤資訊]
-
----
-
-【情境 B：YouTube 影片 - 摘要筆記 / 大綱整理】
-📝 影片內容精華筆記
-
-📌 核心大綱：
-▫️ [重點 1]
-▫️ [重點 2]
-▫️ [重點 3]
-
-💡 適合誰看？
-[分析目標受眾]
-
-🚩 快速總結
-[一句話精華]
-
----
-
-【情境 C：一般網址 - 詐騙與釣魚偵測】
-燈號說明：🔴 高風險(明確詐騙) / 🟡 中風險(疑似風險) / 🟢 低風險(安全網站)
-[燈號] 風險摘要：[一句話評定風險等級與核心理由]
-
-🔍 深度鑑識分析
-▫️ 品牌模仿：[分析是否偽造知名品牌]
-▫️ 內容偵測：[分析內文語義與誘騙話術]
-▫️ 圖文一致性：[分析標題與內文是否匹配]
-
-🛡️ 安全評級
-靜態掃描分數：[參考附帶的分數]分
-整體評級：[🔴 高風險 / 🟡 中風險 / 🟢 低風險]
-
-🚫 專家建議
-[明確告知使用者該採取什麼行動]
-
----
-
-【情境 D：即時交通 / 天氣時事 / 實用知識 / 日常問答】
-▶ 若為「一般常識/知識型問答」（如：B群何時吃、生活常識）：
-💡 核心結論：[直球對決，一句話給出最明確解答]
-
-📌 核心重點：
-▫️ [重點 1：核心觀念或原理解析]
-▫️ [重點 2：常見誤區或使用建議]
-▫️ [重點 3：具體行動指南]
-
-⚠️ 貼心提醒：
-▫️ [實用注意事項]
-
-🚩 專家小叮嚀
-[一句話貼心叮嚀或總結]
-
-▶ 若為「即時性問答」（如：路況車況、突發新聞、今日天氣、大眾運輸）：
-情況 1（有充足即時檢索/時速數據時）：
-💡 核心結論：[直球對決！若為國道路況，請依據上下文提供的即時時速與總里程進行計算，輸出：截至今日 HH:MM，從 [起點] 走 [主要國道] 前往 [終點]：預估車程約 X 小時 XX 分～X 小時 XX 分，現在出發預計約 HH:MM～HH:MM 抵達]
-
-📌 即時情報與關鍵重點：
-▫️ 主要壅塞點：[列出平均時速較低（如低於 65 km/h）的各瓶頸路段與時速，例如：北斗—員林：時速約 60 公里、台中系統—后里：時速約 53 公里]
-▫️ 突發事件：[列出當前事故、施工或故障車通報；若無則說明主線目前無重大封閉事故]
-▫️ 路線比較：[簡要分析主要國道與替代路線，如：比較國1與國3，或提醒竹科/市區周邊車潮]
-
-⚠️ 貼心提醒：
-▫️ [出發或改道建議，例如：出發前務必開啟即時導航確認最新事故變化]
-
-🚩 專家小叮嚀
-[一句話提醒]
-
-情況 2（無即時檢索數據，或僅有靜態常識時）：
-💡 核心結論：目前系統無法取得 [查詢事項] 的即時官方數據，建議直接開啟專用工具確認。
-
-📌 關鍵重點與參考資訊：
-▫️ 現況說明：檢索上下文缺乏當天當下之即時回報，無法確認現況是否有事故/壅塞/異常。
-▫️ 常規參考：[提供通用經驗或平均行車時間，並註明「僅供一般常態參考，非即時現況」]
-▫️ 推薦查詢：[明確指引最權威專用工具，如：國道路況請以 1968 或 Google Maps 即時導航為準]
-
-⚠️ 貼心提醒：
-▫️ [出發或行動前的叮嚀]
-
-🚩 專家小叮嚀
-即時動態瞬息萬變，切勿依賴靜態估算，請以即時導航或官方最新公告為準。
-
----
-
-【情境 E：周邊停車與即時車位推薦】
-當問題涉及「停車、停車場、車位、停哪、好停車」時：
-💡 核心結論：[直球推薦！一句話指出前往 [目標地] 目前最推薦停放於哪一個停車場、剩餘多少車位、每小時費率為何]
-
-📌 周邊推薦停車場（依空位與便利度推薦）：
-▫️ [停車場名稱 1]：🚗 剩餘車位：約 XX 格 (空位充足/正常) | 💰 費率：每小時 XX 元 (當日上限 XX 元) | 🔗 [附導航連結]
-▫️ [停車場名稱 2]：🚗 剩餘車位：約 XX 格 | 💰 費率：每小時 XX 元 | 🔗 [附導航連結]
-▫️ [若有已客滿之熱門停車場，提示避免排隊進場]
-
-⚠️ 貼心提醒：
-▫️ [假日熱門商圈車位流動迅速，建議點擊連結開啟即時導航前往]
-
-🚩 專家小叮嚀
-[提醒進場注意限高或收費折抵規定]
+▶ 情境 4：生活即時問答（天氣、路況、發票、知識常識）
+- 圖示：💡 核心結論
+- 格式：
+  ▫️ 國道路況：直球回答目前預估行車時間、時速與主要壅塞點（若無即時數據則坦承並指引 1968）。
+  ▫️ 統一發票：直接完整列出該期中獎號碼，無須多餘問候。
+  ▫️ 生活問答：直球給出最核心正確答案。
   `;
 
   // 備援模型清單 (最新正式推薦 ➔ 極速防線 ➔ 經典 Flash ➔ 旗艦 Pro)
@@ -832,7 +838,7 @@ function callGeminiInteractionsAPI(inputContent) {
     },
     "generationConfig": {
       "temperature": 0.3,
-      "maxOutputTokens": 2048
+      "maxOutputTokens": 1024
     }
   };
 
@@ -875,8 +881,7 @@ function callGeminiInteractionsAPI(inputContent) {
       if (code === 200) {
         let replyText = extractAnyTextFromGemini(json);
         if (replyText) {
-          replyText += `\n\n🤖 (Powered by ${model})`;
-          return replyText;
+          return { text: replyText, model: model };
         }
       }
 
@@ -899,7 +904,7 @@ function callGeminiInteractionsAPI(inputContent) {
     }
   }
 
-  return lastErrorDetail + "\n請稍後再試，或聯絡開發人員。";
+  return { text: lastErrorDetail + "\n請稍後再試，或聯絡開發人員。", model: "" };
 }
 
 /**

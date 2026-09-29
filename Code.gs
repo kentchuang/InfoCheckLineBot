@@ -136,8 +136,12 @@ function processMessage(event) {
     // 2. 即時抓取網頁內容 (利用 GAS fetch，不消耗搜尋配額)
     const pageContext = fetchWebPageContext(targetUrl);
     // 3. AI 深度研判 (結合網址特徵 + 網頁內容)
-    const scamReport = callGeminiAPI(`待偵測網址：${targetUrl}\n靜態風險分數：${riskScore}分\n\n網頁內容摘要：\n${pageContext}`, 'SCAM_CHECK');
-    if (scamReport) replyToLine(replyToken, scamReport);
+    const aiResponse = callGeminiAPI(`待偵測網址：${targetUrl}\n靜態風險分數：${riskScore}分\n\n網頁內容摘要：\n${pageContext}`, 'SCAM_CHECK');
+    if (aiResponse && aiResponse.text) {
+      let finalMsg = aiResponse.text.trim();
+      if (aiResponse.model) finalMsg += `\n\n🤖 模型：${aiResponse.model}`;
+      replyToLine(replyToken, finalMsg);
+    }
     return;
   }
 
@@ -171,8 +175,12 @@ function processMessage(event) {
       console.error('Oembed 抓取失敗:', err);
     }
 
-    const analysisReport = callGeminiAPI(videoContext, 'SUMMARY');
-    if (analysisReport) replyToLine(replyToken, analysisReport);
+    const aiResponse = callGeminiAPI(videoContext, 'SUMMARY');
+    if (aiResponse && aiResponse.text) {
+      let finalMsg = aiResponse.text.trim();
+      if (aiResponse.model) finalMsg += `\n\n🤖 模型：${aiResponse.model}`;
+      replyToLine(replyToken, finalMsg);
+    }
     return;
   }
 
@@ -219,13 +227,15 @@ ${subjectQuery}
     const verification = getDeepFactCheckContext(subjectQuery || userText);
     const combinedPrompt = `${factContext}\n\n${verification.contextText}`;
 
-    let analysisReport = callGeminiAPI(combinedPrompt, 'FACT_CHECK');
-    if (analysisReport) {
-      // 程式端保底附加可供使用者親自點擊核實的資料來源網址
+    const aiResponse = callGeminiAPI(combinedPrompt, 'FACT_CHECK');
+    if (aiResponse && aiResponse.text) {
+      let finalMsg = aiResponse.text.trim();
+      // 若有需求時加上求證連結
       if (verification.sources && verification.sources.length > 0) {
-        analysisReport += formatCitationFootnote(verification.sources);
+        finalMsg += formatCitationFootnote(verification.sources);
       }
-      replyToLine(replyToken, analysisReport);
+      if (aiResponse.model) finalMsg += `\n\n🤖 模型：${aiResponse.model}`;
+      replyToLine(replyToken, finalMsg);
     }
     return;
   }
@@ -245,12 +255,88 @@ function isYoutubeUrl(text) {
  * @param {string} url - 待檢測網址
  * @return {number} riskScore - 風險點數 (70 分以上為高風險)
  */
+/**
+ * 安全解析 URL (相容 Google Apps Script 環境，避免 WHATWG URL 不存在拋錯)
+ * @param {string} url - 待解析網址
+ * @return {Object|null}
+ */
+function parseUrlSafe(url) {
+  if (!url || typeof url !== 'string') return null;
+  const match = url.trim().match(/^(https?:)\/\/([^\/?#:]+)(?::\d+)?(\/[^?#]*)?(?:\?([^#]*))?(?:#(.*))?$/i);
+  if (!match) return null;
+  return {
+    protocol: match[1].toLowerCase(),
+    hostname: match[2].toLowerCase(),
+    pathname: match[3] || '/',
+    search: match[4] ? ('?' + match[4]) : '',
+    searchParamsString: match[4] ? match[4].toLowerCase() : '',
+    hash: match[5] || ''
+  };
+}
+
+/**
+ * 檢查是否為官方認證/知名信任網域 (白名單)
+ * @param {string} hostname
+ * @return {boolean}
+ */
+function isTrustedDomain(hostname) {
+  if (!hostname) return false;
+  const h = hostname.toLowerCase();
+
+  // 1. 政府與教育機構
+  if (h.endsWith('.gov.tw') || h.endsWith('.edu.tw')) return true;
+
+  // 2. 知名電商與官方短網址
+  const trustedECommerce = [
+    'shopee.tw', 'shp.ee', 'tw.shp.ee',
+    'momo.dm', 'momoshop.com.tw',
+    'pchome.com.tw', '24h.pchome.com.tw',
+    'books.com.tw', 'benefit.books.com.tw',
+    'yahoo.com.tw', 'tw.bid.yahoo.com', 'tw.buy.yahoo.com',
+    'etmall.com.tw', 'u-mall.com.tw', 'pcone.com.tw'
+  ];
+  if (trustedECommerce.some(domain => h === domain || h.endsWith('.' + domain))) return true;
+
+  // 3. 官方超商與電子票券/數位禮券平台 (如 i禮讚、Ticket Xpress)
+  const trustedGifts = [
+    'ibon.com.tw', '7-11.com.tw', 'citycafe.com.tw', 'openpoint.com.tw',
+    'ibongift.com', // 統一超商 (安源資訊 i禮讚) 官方數位票券平台
+    'edenred.tw', 'ticketexpress.tw', // 宜睿智慧 Ticket Xpress
+    'checkin.131.com.tw', 'gift.131.com.tw',
+    'ticket.com.tw'
+  ];
+  if (trustedGifts.some(domain => h === domain || h.endsWith('.' + domain))) return true;
+
+  // 4. 知名社群與通用官方跳轉
+  const trustedSocial = [
+    'line.me', 'lin.ee', 'page.line.me',
+    'facebook.com', 'fb.me', 'fb.com',
+    'instagram.com', 'threads.net',
+    'youtube.com', 'youtu.be',
+    'google.com', 'google.com.tw', 'goo.gl', 'g.co'
+  ];
+  if (trustedSocial.some(domain => h === domain || h.endsWith('.' + domain))) return true;
+
+  return false;
+}
+
+/**
+ * 詐騙網址靜態風險評分
+ * @param {string} url - 待檢測網址
+ * @return {number} riskScore - 風險點數 (70 分以上為高風險)
+ */
 function analyzeUrlRisk(url) {
   let riskScore = 0;
   try {
-    const urlObj = new URL(url);
-    const hostname = urlObj.hostname.toLowerCase();
-    const searchParams = urlObj.search.toLowerCase();
+    const parsed = parseUrlSafe(url);
+    if (!parsed) return 50;
+    const hostname = parsed.hostname;
+    const searchParams = parsed.searchParamsString;
+
+    // A. 命中官方信任白名單，且無山寨特徵，直接評定為 0 分安全
+    if (isTrustedDomain(hostname)) {
+      return 0;
+    }
 
     // 1. 高風險 TLD (+40)
     const riskyTlds = ['.shop', '.top', '.xyz', '.vip', '.site', '.cc', '.fun', '.online', '.buzz', '.click', '.link'];
@@ -274,7 +360,7 @@ function analyzeUrlRisk(url) {
     if (fakeBrands.some(fb => hostname.includes(fb))) riskScore += 60;
 
   } catch (e) {
-    console.log('URL 解析錯誤: ' + url);
+    console.log('URL 分析異常: ' + e.message);
   }
   return riskScore;
 }
@@ -283,46 +369,70 @@ function analyzeUrlRisk(url) {
  * 檢查網址是否為安全的公開 HTTP/HTTPS 網址 (防禦 SSRF 與內部私有位址)
  */
 function isSafePublicUrl(url) {
-  if (!url || typeof url !== 'string') return false;
-  try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
-    const host = parsed.hostname.toLowerCase();
-    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') return false;
-    if (host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.')) return false;
-    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
-    return true;
-  } catch (e) {
-    return false;
-  }
+  const parsed = parseUrlSafe(url);
+  if (!parsed) return false;
+  if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+  const host = parsed.hostname;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') return false;
+  if (host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.')) return false;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return false;
+  return true;
 }
 
 /**
- * 即時抓取網頁內容作為 AI 研判依據 (內建 SSRF 安全防禦)
+ * 即時抓取網頁內容作為 AI 研判依據 (內建 SSRF 安全防禦與關鍵資安特徵偵測)
  * @param {string} url - 待偵測網址
  * @return {string} 網頁標題與內容摘要
  */
 function fetchWebPageContext(url) {
   if (!isSafePublicUrl(url)) {
-    return "[安全攔截] 該網址不符合安全規範或為內部私有位址。";
+    return "[安全攔截] 該網址為內部私有 IP 或非公開 HTTP/HTTPS 位址。";
   }
+
+  const parsed = parseUrlSafe(url);
+  const isTrusted = parsed && isTrustedDomain(parsed.hostname);
 
   try {
     const response = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
       followRedirects: true,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0" }
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" }
     });
 
     const code = response.getResponseCode();
-    if (code !== 200) return `[無法正常存取] 伺服器回傳狀態碼：${code}`;
+    if (code !== 200) {
+      if (code === 403 || code === 401) {
+        return `[存取受限] 伺服器狀態碼 ${code}（目標站台具備反爬蟲機制或為手機 App 專屬連結）。${isTrusted ? '此網域屬於官方信任平台。' : ''}`;
+      }
+      return `[無法正常存取] 伺服器回傳狀態碼：${code}`;
+    }
 
     const html = response.getContentText();
     // 1. 提取標題
     const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : "無標題";
 
-    // 2. 提取 Body 文本 (去標籤、去腳本，取前 1200 字)
+    // 2. 特徵鑑識 (辨識釣魚表單 vs 官方 APP 整合)
+    const features = [];
+    if (isTrusted) {
+      features.push("✅ 官方認證網域/合法知名服務商架構");
+    }
+
+    // 檢查是否有要求輸入高危敏感資訊的表單欄位
+    const sensitiveInputs = [];
+    if (/(creditcard|card.?num|cvv|cvc|安全碼|有效月年|信用卡號)/i.test(html)) sensitiveInputs.push("信用卡資訊");
+    if (/(網銀密碼|銀行密碼|提款密碼|轉帳密碼)/i.test(html)) sensitiveInputs.push("網路銀行密碼");
+    if (/(otp|手機動態碼)/i.test(html) && !/(turnstile|recaptcha|hcaptcha)/i.test(html)) sensitiveInputs.push("動態簡訊驗證碼");
+    if (sensitiveInputs.length > 0 && !isTrusted) {
+      features.push(`⚠️ 頁面包含敏感輸入表單：${sensitiveInputs.join('、')}`);
+    }
+
+    // 檢查是否有官方 App 深層連結 (Deep Link)
+    if (/(uniopenapp\.page\.link|shopeetw:\/\/|line:\/\/|openpoint)/i.test(html)) {
+      features.push("🔗 整合官方 App 深度跳轉/歸戶機制");
+    }
+
+    // 3. 提取 Body 文本 (去標籤、去腳本，取前 1200 字)
     const cleanBody = html.replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<[^>]+>/g, ' ')
@@ -330,9 +440,14 @@ function fetchWebPageContext(url) {
       .trim()
       .substring(0, 1200);
 
-    return `標題：${title}\n內容預覽：${cleanBody}`;
+    let resultContext = `標題：${title}\n`;
+    if (features.length > 0) {
+      resultContext += `特徵辨識：${features.join(' | ')}\n`;
+    }
+    resultContext += `內容預覽：${cleanBody}`;
+    return resultContext;
   } catch (e) {
-    return `[存取失敗] 原因：${e.message}`;
+    return `[存取受限] 無法擷取網頁內文（${e.message}）。${isTrusted ? '此網域屬於官方信任平台。' : ''}`;
   }
 }
 
@@ -576,15 +691,15 @@ function getDeepFactCheckContext(factQuery) {
 }
 
 /**
- * 格式化供使用者親自核實之資料來源註腳
+ * 格式化供使用者親自核實之資料來源註腳 (精簡版)
  * @param {Array<Object>} sources - 來源清單 [{title, url}]
  * @return {string} 格式化後的文字區塊
  */
 function formatCitationFootnote(sources) {
   if (!sources || sources.length === 0) return "";
-  let footnote = "\n\n─────────────────\n🔗 查證依據與核實連結：";
-  sources.forEach(src => {
-    footnote += `\n▫️ ${src.title}：\n${src.url}`;
+  let footnote = "\n\n🔗 求證連結：";
+  sources.slice(0, 2).forEach(src => {
+    footnote += `\n▫️ ${src.title}：${src.url}`;
   });
   return footnote;
 }
@@ -594,106 +709,38 @@ function formatCitationFootnote(sources) {
  */
 function callGeminiAPI(userInput, mode = 'FACT_CHECK') {
   const FACT_CHECK_INSTRUCTION = `
-# 💡 角色定位
-你是一位資深的「數位內容鑑識專家」與「專業事實查核員」。你具備高度的資訊素養，能精準區分「網路行銷包裝（如：標題黨、吸睛剪輯）」與「實質內容真偽」。你擅長透過頻道背景、作者身分（如：執業醫師、專業學者）與邏輯結構，評估資訊的權威性與可靠度。
+你是一位專業的「事實查核與數位鑑識 AI 助手」。
+使用者需要「極致精簡、直球對決」的回答，絕對嚴禁贅字與冗長分析。
 
-# 🎯 核心任務
-針對影片資訊進行多維度分析，避免因「行銷風格」而誤判「內容實質」：
-1. 來源身分核實：優先識別作者是否為具名之專業人士（醫師、專家、具公信力機構）。區分「具名專業人士的個人頻道」與「匿名的內容農場」。
-2. 區分包裝與內容：
-   - 行銷包裝：識別標題黨、恐懼行銷或懸念設計（這些是現代流量工具，不代表內容必定虛假）。
-   - 實質內容：分析核心斷言是否具備科學/醫學基礎，或是否存在嚴重的去脈絡化、二元對立謬誤。
-3. AI 參與度評估：區分「AI輔助工具（剪輯、字幕、封面）」與「全自動 AI 內容農場（合成語音、無人臉實拍、內容空洞）」。
-
-# 🛠 運作流程
-1. 專業背景搜索：檢查頻道主或講者是否為真實世界可查證的專業人士。
-2. 邏輯陷阱偵測：檢查論述是否包含「櫻桃小丸子式採樣（極端案例概括化）」或「因果倒置」。
-3. 平衡評價：若影片雖然標題誇張，但內容包含正確的專業建議（如均衡飲食、遵循醫囑），應給予中性或正面的評價，而非僅因標題判斷為高風險。
-
-# 🚫 限制與原則
-- 嚴禁 Markdown：禁止使用 #, ##, **, --- 等標記語法。
-- 燈號邏輯：🔴 高風險（造謠、惡意誤導、詐騙）、🟡 中風險（標題黨、資訊不全、非專業建議）、🟢 低風險（權威來源、實證科學、專業分享）。
-- 視覺優化：善用 Emoji (▫️, 🤖, ⚖️, 🚩) 與換行。
-- 屏效比：確保重點在 LINE 手機端能一屏看完。
-
-# 🏁 最終呈現格式 (嚴格執行)
-燈號說明：🔴 高風險(造謠/詐騙) / 🟡 中風險(標題黨/非專業) / 🟢 低風險(權威/專業)
-[燈號] 核心摘要：[一句話總結：區分行銷風格與內容實質]
-
-🤖 AI 鑑定 (參與度：XX%)
-▫️ 特徵：[區分是 AI 輔助製作還是純 AI 生成，並指出頻道經營型態]
-▫️ 屬性：[專家實拍 / 知識分享 / 內容農場 / 搬運剪輯]
-
-⚖️ 真實性評估
-▫️ [分析核心建議的正確性與邏輯。若查證資料中包含事實查核中心、MyGoPen 或官方衛生機構之闢謠結論，請具名引述其依據]
-
-🚩 專家結論
-[一句話建議：可作參考但須留意標題誇張 / 專業推薦 / 內容農場 / 錯誤資訊]
+【格式輸出最高準則：只要 燈號 + 最終結論】
+- 嚴禁 Markdown 語法（絕對禁止 #, ##, **, ---, \` 等標記符號，直接輸出乾淨純文字）。
+- 一律使用繁體中文。
+- 燈號：🔴 錯誤謠言 / 🟡 部分不實(存疑) / 🟢 屬實訊息
+- 呈現格式：
+[燈號] [核心結論：1~2 句話直球指出事實真相與科學/醫學闢謠依據]
   `;
 
   const SUMMARY_INSTRUCTION = `
-# 💡 角色定位
-你是一位專業的「影片內容筆記精靈」。你擅長將長篇影片轉化為結構化、易讀的精華筆記。
+你是一位專業的「內容重點精華助手」。
+使用者需要「極致精簡、重點提煉」的回答，絕對嚴禁展開大篇幅章節。
 
-# 🎯 核心任務
-1. 重點摘要：提取影片的核心價值與主要論點。
-2. 結構化大綱：將內容分為 3-5 個主要章節或主題。
-3. 金句/結論：總結影片最值得記住的一句話。
-
-# 🚫 限制與原則
-- 嚴禁 Markdown 語法 (如 #, **, ---)。
-- 視覺優化：善用 Emoji (📝, 📌, 💡)。
-- 屏效比：確保重點在 LINE 手機端能一屏看完。
-
-# 🏁 最終呈現格式
-📝 影片內容精華筆記
-
-📌 核心大綱：
-▫️ [大綱 1]
-▫️ [大綱 2]
-▫️ [大綱 3]
-
-💡 適合誰看？
-[分析受眾]
-
-🚩 快速總結
-[一句話精華]
+【格式輸出最高準則：只要 圖示 + 最終結論】
+- 嚴禁 Markdown 語法（絕對禁止 #, ##, **, ---, \` 等標記符號，直接輸出乾淨純文字）。
+- 一律使用繁體中文。
+- 呈現格式：
+📝 重點精華：[2~3 句話提煉全片最核心論點與收穫]
   `;
 
   const SCAM_CHECK_INSTRUCTION = `
-# 💡 角色定位
-你是一位資深的「網路詐騙鑑識專家」與「資安分析師」。你擅長透過網域特徵、URL 結構、網頁內容語義分析與社交工程手法，精準判別連結是否為詐騙、釣魚或惡意網站。
+你是一位資深的「網路詐騙鑑識與資安專家」。
+使用者需要「極致精簡、直球對決」的判斷，絕對嚴禁冗長條列分析。
 
-# 🎯 核心任務
-你將收到一個待偵測網址、網頁標題、內容片段以及系統預先計算的靜態風險分數，請綜合判斷：
-1. 品牌模仿分析：檢測網頁內容或標題是否在模仿特定知名品牌（如 Shopee, Momo, 銀行等），但網域卻不符。
-2. 語義詐騙偵測：分析內容片段是否包含大量詐騙話術（如「限時搶購」、「餘額不足」、「帳號異常」、「請立即登入」）。
-3. 圖文不符檢查：判斷網頁標題與實際內文是否牛頭不對馬嘴（常見於惡意跳轉或釣魚頁面）。
-4. 結構與網域風險：TLD 類型、品牌仿冒、網域亂碼、URL 可疑參數。
-5. 整體風險評級：🔴 高風險 / 🟡 中風險 / 🟢 低風險。
-
-# 🚫 限制與原則
-- 嚴禁 Markdown 語法 (如 #, **, ---)。
-- 第一行必須先說明燈號意義，第二行才是以風險燈號開頭的風險摘要。
-- 善用 Emoji (🔍, ⚠️, 🛡️, 🚫) 增加可讀性。
-- 屏效比：確保重點在 LINE 手機端能一屏看完。
-- 結論必須包含明確的建議行動。
-
-# 🏁 最終呈現格式 (嚴格執行)
-燈號說明：🔴 高風險(明確詐騙) / 🟡 中風險(疑似風險) / 🟢 低風險(安全網站)
-[燈號] 風險摘要：[一句話評定風險等級與核心理由]
-
-🔍 深度鑑識分析
-▫️ 品牌模仿：[分析是否偽造知名品牌]
-▫️ 內容偵測：[分析內文語義與誘騙話術]
-▫️ 圖文一致性：[分析標題與內文是否匹配]
-
-🛡️ 安全評級
-靜態掃描分數：[靜態風險分數]分
-整體評級：[🔴 高風險 / 🟡 中風險 / 🟢 低風險]
-
-🚫 專家建議
-[明確告知使用者該採取什麼行動，例如：切勿輸入資料、立即關閉視窗]
+【格式輸出最高準則：只要 燈號 + 最終結論】
+- 嚴禁 Markdown 語法（絕對禁止 #, ##, **, ---, \` 等標記符號，直接輸出乾淨純文字）。
+- 一律使用繁體中文。
+- 燈號：🟢 官方安全連結 / 🟡 中風險需留意 / 🔴 高風險詐騙
+- 呈現格式：
+[燈號] [核心結論：說明是否為官方正規網址/跳轉，是否有索取信用卡與帳密風險，告訴使用者該怎麼做]
   `;
 
   const systemInstruction = mode === 'SUMMARY' ? SUMMARY_INSTRUCTION
@@ -759,8 +806,7 @@ function callGeminiAPI(userInput, mode = 'FACT_CHECK') {
       // 如果成功分析
       if (code === 200 && json.candidates && json.candidates[0].content && json.candidates[0].content.parts[0].text) {
         let finalReply = json.candidates[0].content.parts[0].text;
-        finalReply += `\n\n🤖 (Powered by ${model})`;
-        return finalReply;
+        return { text: finalReply, model: model };
       } else {
         // 如果遇到 503 高負載或 429 請求限制，紀錄後繼續跳下一個
         if (code === 503 || code === 429) {
@@ -773,7 +819,7 @@ function callGeminiAPI(userInput, mode = 'FACT_CHECK') {
           console.error(`Gemini API Error [${model}]:`, responseText);
           let errDetail = `📌 分析失敗 [${model}] (Code: ${code})`;
           if (json.error) errDetail += "\n原因: " + json.error.message;
-          return errDetail;
+          return { text: errDetail, model: model };
         }
       }
     } catch (err) {
@@ -784,7 +830,7 @@ function callGeminiAPI(userInput, mode = 'FACT_CHECK') {
   }
 
   // 如果所有模型都走完都失敗 (通常是 503 高峰)，回傳最後的錯誤原因
-  return lastErrorDetail + "\n請稍後再試，或聯絡開發人員。";
+  return { text: lastErrorDetail + "\n請稍後再試，或聯絡開發人員。", model: "" };
 }
 
 /**
