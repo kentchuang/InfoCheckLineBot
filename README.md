@@ -185,7 +185,7 @@
 | **6 大官方 API 整合<br>(國道車速/停車/氣象/油價/發票/急診)** | ❌ 無（僅文字查核與 YouTube） | 🟢 **完整內建 6 大官方 API** + 自動快取與免 Key 備援 |
 | **今明多日天氣預報** | ❌ 無 | 🟢 **支援今明 36 小時多時段預報與降雨機率** |
 | **DuckDuckGo 檢索範圍** | 僅限「事實查核」時觸發 | **全面支援**：@TAG 查天氣/時事，或未 TAG 時查核謠言皆會上網 |
-| **權限控管方式** | 單軌：`ALLOWED_GROUP_IDS` (群組白名單) | **雙軌**：支援 Google 試算表動態管理（含快取），亦完全相容純 `ALLOWED_GROUP_IDS` |
+| **權限控管方式** | 單軌：`ALLOWED_GROUP_IDS` (群組白名單) | **雙軌**：支援 Google 試算表動態管理（含快取），亦支援獨立系統參數 `ALLOWED_GROUP_IDS`（群組）與 `ALLOWED_USER_IDS`（私訊） |
 | **文末核實連結** | 🟢 有（查核時精簡附帶權威出處網址） | 🟢 有（查核、天氣、時事皆會精簡附帶資料來源網址） |
 | **Markdown 安全清洗** | 基礎過濾 | 🟢 **內建專屬 `sanitizeForLine`**，100% 杜絕 Markdown 標籤溢出 |
 | **部署門檻** | **極簡**（貼上即用） | **極簡至中等**（可純白名單跑，亦可搭配試算表與 TDX） |
@@ -209,7 +209,8 @@
 3. 點選 **「編輯指令碼屬性」** ➔ **「新增指令碼屬性」**：
    - `LINE_ACCESS_TOKEN`：貼入您的 LINE Token。
    - `GEMINI_API_KEY`：貼入您的 Gemini API Key。
-   - `ALLOWED_GROUP_IDS`：貼入允許的群組 ID (多個請用逗號 `,` 分隔；亦可將個人 User ID 填於此)。
+   - `ALLOWED_GROUP_IDS` *(選填)*：貼入允許的 LINE 群組 ID (多個請用逗號 `,` 分隔；可填 `*` 開放所有群組)。
+   - `ALLOWED_USER_IDS` *(選填)*：貼入允許一對一私訊的 LINE 使用者 ID (多個請用逗號 `,` 分隔；可填 `*` 開放所有人私訊)。不與群組 ID 混用。
    - `TDX_CLIENT_ID` *(推薦)*：貼入 TDX Client ID。
    - `TDX_CLIENT_SECRET` *(推薦)*：貼入 TDX Client Secret。
    - `CWA_API_KEY` *(選填)*：中央氣象署授權碼（若無則自動啟用全球多日預報備援）。

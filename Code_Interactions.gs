@@ -18,6 +18,10 @@ const GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('GEMI
 // 權限控管 Google Sheet 的 ID (填入試算表網址中 /d/ 與 /edit 之間的那串英數字)
 const SPREADSHEET_ID = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
 
+// 權限控管系統參數 (若未綁定 Google 試算表，可直接於指令碼屬性中設定白名單，多筆以逗號分隔)：
+// - ALLOWED_USER_IDS  : 允許一對一私訊的 LINE 使用者 ID (如 U123456..., U789012...，亦可填 * 代表開放所有人私訊)
+// - ALLOWED_GROUP_IDS : 允許加入並使用的 LINE 群組 ID (如 C123456..., C789012...)
+
 // 2. 官方開放資料 API 授權金鑰 (共用交通部 TDX 金鑰，一組金鑰同時搞定國道路況與氣象服務！)
 const TDX_CLIENT_ID = (PropertiesService.getScriptProperties().getProperty('TDX_CLIENT_ID') || '').trim(); // 交通部 TDX (tdx.transportdata.tw)
 const TDX_CLIENT_SECRET = (PropertiesService.getScriptProperties().getProperty('TDX_CLIENT_SECRET') || '').trim();
@@ -107,14 +111,14 @@ function processMessage(event) {
     return;
   }
 
-  // 3. 權限控管檢查 (優先讀取 Google Sheet 白名單，若未設定則比對 ALLOWED_GROUP_IDS)
+  // 3. 權限控管檢查 (優先讀取 Google Sheet 白名單，若未設定則比對 ALLOWED_USER_IDS / ALLOWED_GROUP_IDS)
   const isAuthorized = checkAuthorization(currentId, sourceType);
   if (!isAuthorized) {
     if (sourceType === 'user') {
       if (SPREADSHEET_ID) {
         replyToLine(replyToken, `⛔ 抱歉，您尚未取得使用授權。\n\n您的專屬 User ID 為：\n${currentId}\n\n💡 請聯絡管理員將您的 ID 新增至 Google 試算表白名單中以開通權限。`);
       } else {
-        replyToLine(replyToken, `⛔ 抱歉，這是一個私人專用的查核助手機器人，目前僅限於已授權的 LINE 群組內提供服務，恕不開放未授權的一對一私訊喔！\n\n💡 您的 User ID 是：\n${currentId}\n（管理員可將此 ID 加入 ALLOWED_GROUP_IDS 白名單以開通私訊功能）`);
+        replyToLine(replyToken, `⛔ 抱歉，這是一個私人專用的查核助手機器人，目前僅限於已授權的 LINE 群組或特定使用者私訊提供服務，恕不開放未授權的一對一私訊喔！\n\n💡 您的 User ID 是：\n${currentId}\n（管理員可將此 ID 加入系統參數 ALLOWED_USER_IDS 白名單以開通一對一私訊功能）`);
       }
     }
     // 群組若未授權則保持靜默，避免打擾
@@ -257,25 +261,55 @@ function extractSearchQuery(text) {
 /**
  * 檢查使用者或群組是否具備授權 (支援 Google Sheet 與快取)
  * @param {string} id - User ID 或 Group ID
- * @param {string} type - 'user' 或 'group'
+ * @param {string} type - 'user', 'group' 或 'room'
  * @return {boolean}
  */
 function checkAuthorization(id, type) {
   // A. 如果設定了 SPREADSHEET_ID，以 Google Sheet 為主
   if (SPREADSHEET_ID) {
     const whitelist = getAuthorizedListFromSheet();
-    // 若試算表內無任何紀錄，預設放行或拒絕 (此處設定為若有設定 ID 則嚴格比對)
+    // 若試算表內有設定名單，則嚴格比對
     if (whitelist.length > 0) {
       return whitelist.includes(id);
     }
   }
 
-  // B. 備援相容：若未設定 SPREADSHEET_ID，則比對 GAS 指令碼屬性 ALLOWED_GROUP_IDS
-  const rawAllowedIds = PropertiesService.getScriptProperties().getProperty('ALLOWED_GROUP_IDS') || "";
-  const allowedIds = rawAllowedIds ? rawAllowedIds.split(',').map(item => item.trim()) : [];
-  
-  if (allowedIds.length > 0) {
-    return allowedIds.includes(id);
+  // B. 備援相容：若未設定 SPREADSHEET_ID，則依來源類型獨立比對系統參數 (GAS 指令碼屬性)
+  const scriptProps = PropertiesService.getScriptProperties();
+  const rawAllowedGroupIds = scriptProps.getProperty('ALLOWED_GROUP_IDS') || "";
+  const rawAllowedUserIds = scriptProps.getProperty('ALLOWED_USER_IDS') || "";
+
+  const allowedGroupIds = rawAllowedGroupIds ? rawAllowedGroupIds.split(',').map(item => item.trim()).filter(Boolean) : [];
+  const allowedUserIds = rawAllowedUserIds ? rawAllowedUserIds.split(',').map(item => item.trim()).filter(Boolean) : [];
+
+  // 1. 一對一私訊 (type === 'user')：獨立由 ALLOWED_USER_IDS 控管，不與 ALLOWED_GROUP_IDS 混用
+  if (type === 'user') {
+    // 支援萬用字元 *：無條件開放所有人私訊
+    if (allowedUserIds.includes('*')) {
+      return true;
+    }
+    // 若設定了使用者白名單，嚴格比對 ID
+    if (allowedUserIds.length > 0) {
+      return allowedUserIds.includes(id);
+    }
+    // 若未設定 ALLOWED_USER_IDS，但設定了 ALLOWED_GROUP_IDS，表示此為群組專用機器人，未設定的使用者私訊應拒絕
+    if (allowedGroupIds.length > 0) {
+      return false;
+    }
+    // 若兩者皆未設定任何白名單限制，預設開放
+    return true;
+  }
+
+  // 2. 群組或多人聊天室 (group / room)：獨立由 ALLOWED_GROUP_IDS 控管，不與 ALLOWED_USER_IDS 混用
+  if (allowedGroupIds.includes('*')) {
+    return true;
+  }
+  if (allowedGroupIds.length > 0) {
+    return allowedGroupIds.includes(id);
+  }
+  // 若未設定 ALLOWED_GROUP_IDS，但設定了 ALLOWED_USER_IDS，表示此為個人私訊專用機器人，未設定之群組應拒絕
+  if (allowedUserIds.length > 0) {
+    return false;
   }
 
   // C. 若兩者皆未設定任何白名單限制，預設開放

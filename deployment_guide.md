@@ -64,7 +64,8 @@
 | :--- | :---: | :--- | :--- |
 | `LINE_ACCESS_TOKEN` | **必填** | `v9a8s7d6f5...` | LINE Messaging API 的長金鑰。 |
 | `GEMINI_API_KEY` | **必填** | `AIzaSy...` | Google AI Studio 申請的 Gemini 金鑰。 |
-| `ALLOWED_GROUP_IDS` | **強烈建議** | `C123456..., U98765...` | 授權白名單（群組 ID 或個人 User ID，多個請用半形逗號 `,` 分開）。 |
+| `ALLOWED_GROUP_IDS` | *選填* | `C123456..., C789012...` | 授權群組白名單（多個請用半形逗號 `,` 分開；亦可填 `*` 開放所有群組）。 |
+| `ALLOWED_USER_IDS` | *選填* | `U123456..., U789012...` | 授權一對一私訊白名單（多個請用半形逗號 `,` 分開；亦可填 `*` 開放所有人私訊）。**不與群組 ID 混用**。 |
 | `SPREADSHEET_ID` | *選填* | `1BxiMVs0XRA5nFM...` | 僅限 `Code_Interactions.gs` 且希望透過 Google Sheet 管理白名單時填入。 |
 | `TDX_CLIENT_ID` | *強烈推薦* | `Your_TDX_Id...` | 交通部 TDX 平台 Client ID（**一組金鑰打通「國道即時車速與事故」及「各縣市路外停車即時剩餘車位」**）。 |
 | `TDX_CLIENT_SECRET` | *強烈推薦* | `Your_TDX_Secret...` | 交通部 TDX 平台 Client Secret。 |
@@ -74,9 +75,8 @@
 > 💡 **防呆機制**：所有金鑰屬性於系統讀取時皆已自動套用 `.trim()` 去除首尾空白與換行，防止複製貼上時夾帶隱藏字元。
 
 3. 若要取得授權 ID：
-   - 群組內輸入：`/get_group_id`（取得以 `C` 開頭的群組 ID）。
-   - 私訊輸入：`/get_id` 或 `/my_id`（取得個人專屬 User ID）。
-   - 將該字串回填至 GAS 的 `ALLOWED_GROUP_IDS` 指令碼屬性中（多個 ID 請用半形逗號 `,` 分隔）。
+   - 群組內輸入：`/get_group_id`（取得以 `C` 開頭的群組 ID，回填至 `ALLOWED_GROUP_IDS`）。
+   - 私訊輸入：`/get_id` 或 `/my_id`（取得以 `U` 開頭的個人 User ID，回填至 `ALLOWED_USER_IDS`）。
 
 ---
 
