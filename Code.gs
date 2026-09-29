@@ -692,13 +692,36 @@ function getDeepFactCheckContext(factQuery) {
 
 /**
  * 格式化供使用者親自核實之資料來源註腳 (精簡版)
+ * 自動過濾 API 開發者平臺、首頁根網址與無效連結，僅保留具體查證文章
  * @param {Array<Object>} sources - 來源清單 [{title, url}]
  * @return {string} 格式化後的文字區塊
  */
 function formatCitationFootnote(sources) {
-  if (!sources || sources.length === 0) return "";
+  if (!sources || !Array.isArray(sources) || sources.length === 0) return "";
+
+  // 過濾無效、純 API 門戶或純根目錄首頁連結
+  const validSources = sources.filter(src => {
+    if (!src || !src.url) return false;
+    const url = src.url.trim();
+
+    // 排除特定 API 開發者平臺與無查證內容之門戶
+    if (/tdx\.transportdata\.tw|freeway\.gov\.tw|data\.gov\.tw|developer\.|api\./i.test(url)) {
+      return false;
+    }
+
+    // 排除純根網域首頁 (例如 https://example.com 或 https://example.com/)，使用者點進去無法直接檢視查證內容
+    const cleaned = url.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    if (!cleaned.includes("/")) {
+      return false;
+    }
+
+    return true;
+  });
+
+  if (validSources.length === 0) return "";
+
   let footnote = "\n\n🔗 求證連結：";
-  sources.slice(0, 2).forEach(src => {
+  validSources.slice(0, 2).forEach(src => {
     footnote += `\n▫️ ${src.title}：${src.url}`;
   });
   return footnote;

@@ -773,13 +773,36 @@ function getDeepFactCheckContext(factQuery) {
 
 /**
  * 格式化供使用者親自核實之資料來源註腳 (精簡版)
+ * 自動過濾 API 開發者平臺、首頁根網址與無效連結，僅保留具體查證文章
  * @param {Array<Object>} sources - 來源清單 [{title, url}]
  * @return {string} 格式化後的文字區塊
  */
 function formatCitationFootnote(sources) {
-  if (!sources || sources.length === 0) return "";
+  if (!sources || !Array.isArray(sources) || sources.length === 0) return "";
+
+  // 過濾無效、純 API 門戶或純根目錄首頁連結
+  const validSources = sources.filter(src => {
+    if (!src || !src.url) return false;
+    const url = src.url.trim();
+
+    // 排除特定 API 開發者平臺與無查證內容之門戶
+    if (/tdx\.transportdata\.tw|freeway\.gov\.tw|data\.gov\.tw|developer\.|api\./i.test(url)) {
+      return false;
+    }
+
+    // 排除純根網域首頁 (例如 https://example.com 或 https://example.com/)，使用者點進去無法直接檢視查證內容
+    const cleaned = url.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    if (!cleaned.includes("/")) {
+      return false;
+    }
+
+    return true;
+  });
+
+  if (validSources.length === 0) return "";
+
   let footnote = "\n\n🔗 求證連結：";
-  sources.slice(0, 2).forEach(src => {
+  validSources.slice(0, 2).forEach(src => {
     footnote += `\n▫️ ${src.title}：${src.url}`;
   });
   return footnote;
@@ -1004,14 +1027,12 @@ function replyToLine(replyToken, text) {
  */
 function dispatchSpecializedData(text) {
   let contextReport = "";
-  const sources = [];
 
   // 1. 交通路況類 (國道、高公局、車況、塞車、事故)
   if (/路況|車況|塞車|國道|高公局|車潮|1968|國1|國2|國3|國4|國5|國6|國10/i.test(text)) {
     const trafficData = fetchHighwayTrafficData(text);
     if (trafficData) {
       contextReport += `【交通部高公局/TDX 國道即時動態】\n${trafficData}\n\n`;
-      sources.push({ title: "高公局 1968 即時路況資訊", url: "https://1968.freeway.gov.tw/" });
     }
   }
 
@@ -1020,7 +1041,6 @@ function dispatchSpecializedData(text) {
     const weatherData = fetchWeatherData(text);
     if (weatherData) {
       contextReport += `【中央氣象署 CWA 即時天氣觀測與預報】\n${weatherData}\n\n`;
-      sources.push({ title: "中央氣象署全球資訊網", url: "https://www.cwa.gov.tw/" });
     }
   }
 
@@ -1029,7 +1049,6 @@ function dispatchSpecializedData(text) {
     const fuelData = fetchFuelPriceData();
     if (fuelData) {
       contextReport += `【台灣中油官方最新牌價資訊】\n${fuelData}\n\n`;
-      sources.push({ title: "台灣中油各項油品牌價公告", url: "https://www.cpc.com.tw/" });
     }
   }
 
@@ -1038,7 +1057,6 @@ function dispatchSpecializedData(text) {
     const erData = fetchEmergencyRoomData(text);
     if (erData) {
       contextReport += `【衛福部健保署重度急救責任醫院即時看板】\n${erData}\n\n`;
-      sources.push({ title: "衛福部中央健保署急診即時訊息", url: "https://info.nhi.gov.tw/" });
     }
   }
 
@@ -1047,7 +1065,6 @@ function dispatchSpecializedData(text) {
     const invoiceData = fetchLatestInvoiceData();
     if (invoiceData) {
       contextReport += `【財政部稅務入口網統一發票最新開獎號碼】\n${invoiceData}\n\n`;
-      sources.push({ title: "財政部稅務入口網發票開獎專區", url: "https://invoice.etax.nat.gov.tw/" });
     }
   }
 
@@ -1056,11 +1073,10 @@ function dispatchSpecializedData(text) {
     const parkingData = fetchParkingData(text);
     if (parkingData) {
       contextReport += `【交通部 TDX 周邊停車場即時車位與費率資訊】\n${parkingData}\n\n`;
-      sources.push({ title: "交通部 TDX 全台即時停車資訊", url: "https://tdx.transportdata.tw/" });
     }
   }
 
-  return { context: contextReport.trim(), sources: sources };
+  return { context: contextReport.trim(), sources: [] };
 }
 
 /**
