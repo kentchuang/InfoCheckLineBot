@@ -1493,7 +1493,7 @@ function fetchEmergencyRoomData(text) {
     });
 
     if (targets.length > 0) {
-      let report = `【衛福部健保署重度急救責任醫院即時看板】\n更新時間：${sysdate}\n`;
+      let report = `【衛福部健保署重度急救責任醫院即時看板】\n更新時間：${sysdate}（僅統計急診室全院依檢傷分類之總等待人數，無提供一般門診細部分科叫號）\n`;
       targets.slice(0, 3).forEach(h => {
         const isFull = h.inform === 'Y' ? '⚠️ 已通報滿床' : '🟢 正常收治';
         report += `▫️ ${h.hosP_NAME} [${isFull}]\n   等待看診：${h.waiT_SEE_CNT || 0} 人 / 等待住院：${h.waiT_GENERAL_CNT || 0} 人 / 等待ICU：${h.waiT_ICU_CNT || 0} 人\n`;

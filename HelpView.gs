@@ -513,6 +513,15 @@ function renderHelpPageHtml() {
         <span class="example-text">@AI 台大醫院急診現在有滿床嗎？等待看診人數</span>
         <button class="copy-btn" onclick="copyCmd('@AI 台大醫院急診現在有滿床嗎？等待看診人數')">📋 複製</button>
       </div>
+      <div class="example-block">
+        <span class="example-text">@bot 台北榮總 急診滿床</span>
+        <button class="copy-btn" onclick="copyCmd('@bot 台北榮總 急診滿床')">📋 複製</button>
+      </div>
+      <div class="callout callout-warning">
+        <strong>⚠️ 醫療看板查詢限制說明：</strong><br>
+        • <strong>僅限急診</strong>：本功能對接「衛福部健保署重度急救責任醫院急診看板」，回傳的是全急診室當下等待看診、等待住院、ICU 人數與 119 通報滿床狀態。<br>
+        • <strong>不支援一般門診細部分科</strong>：急診現場是以檢傷分類（1～5 級）重症優先處置，並非一般門診的預約排隊，因此<strong>無法查詢特定科別（如心臟內科、眼科目前看診叫號）</strong>。若需查詢門診叫號進度，請至各醫院官網或使用醫院專屬 APP。
+      </div>
     </section>
 
     <!-- 區塊 8: 系統與白名單指令 -->
@@ -562,6 +571,13 @@ function renderHelpPageHtml() {
         <summary>Q3: 查核的資料來源從哪裡來？</summary>
         <div class="faq-answer">
           機器人全面採用「免綁卡、零成本」的公開權威來源，包括 Cofacts 真的假的、台灣事實查核中心、MyGoPen，並配合 DuckDuckGo 權威排序二段式爬蟲與 Gemini 官方模型梯隊進行深度分析。
+        </div>
+      </details>
+
+      <details>
+        <summary>Q4: 為什麼急診看板無法查詢特定科別（如心臟科、骨科）看診進度？</summary>
+        <div class="faq-answer">
+          醫療看板功能串接的是「衛福部健保署重度急救責任醫院急診即時訊息」API，旨在提供急診室壅塞與 119 滿床通報警示。急診運作依「檢傷分類」由重症優先搶救，並非門診預約叫號，因此官方開放資料僅統計<strong>全院急診室總等待人數</strong>；各科「一般門診看診號碼」屬於各醫院內部醫療資訊系統（HIS），目前中央無統一開放 API，請至各醫院官網或下載該院 APP 查詢。
         </div>
       </details>
     </section>
