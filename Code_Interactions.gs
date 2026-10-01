@@ -95,17 +95,12 @@ function processMessage(event) {
 
     const helpMsg = `🤖 AI 資訊查核助手｜快速指南
 
-🌟 常用核心口訣：
-1️⃣ 聯網問答：輸入 @AI 或 @bot ＋ 提問
-   • 範例：@AI 明天天氣如何？
-2️⃣ 事實查核：貼上文字 ＋ 包含「真的嗎/查核」
-   • 範例：真的假的？吃菠菜配豆腐會結石？
-3️⃣ 影片整理：貼上 YouTube 網址 ＋ 需求
-   • 範例：幫我整理大綱 https://youtu.be/...
-4️⃣ 詐騙偵測：貼上網址 ＋ 詢問安全
-   • 範例：這網站安全嗎 https://...
-5️⃣ 路況停車：輸入 @Bot ＋ 路況或停車
-   • 範例：@Bot 台南到新竹即時路況
+🌟 常用核心口訣（群組內一律請 @ 機器人，不打擾平時聊天）：
+1️⃣ 聯網問答：@AI ＋ 提問（例：@AI 明天天氣如何？）
+2️⃣ 事實查核：@AI ＋ 查證內容（例：@AI 真的假的？吃菠菜配豆腐會結石？）
+3️⃣ 影片整理：@AI ＋ YouTube 網址（例：@AI 幫我整理大綱 https://youtu.be/...）
+4️⃣ 詐騙偵測：@AI ＋ 網址（例：@AI 這網站安全嗎 https://...）
+5️⃣ 路況停車：@Bot ＋ 路況或停車（例：@Bot 台南到新竹即時路況）
 6️⃣ 查詢 ID：輸入 /get_id${urlSection}`;
     replyToLine(replyToken, helpMsg);
     return;
@@ -131,20 +126,11 @@ function processMessage(event) {
   // 精準喚醒：支援 @AI、@ai、@Ai、@Bot、@bot（不分大小寫），且後方需為冒號、逗號、空格或結尾，100% 防止 Email (如 abc@gmail.com, test@ai.com) 誤觸
   const isMentioned = !!(event.message.mention && event.message.mention.mentionees && event.message.mention.mentionees.length > 0);
   const hasCallTag = /(?:^|\s)@(ai|bot)(?:[:：\s,，]|$)/i.test(userText);
-  const isTaggedBot = isDirectChat || isMentioned || hasCallTag; // 使用者是否主動 TAG 呼叫機器人 (或私訊)
+  const isTaggedBot = isMentioned || hasCallTag; // 使用者是否主動 TAG 呼叫機器人
 
-  // 被動觸發關鍵字清單 (在群組未 TAG 機器人時，僅針對特定安全與查核任務被動響應，避免打擾日常閒聊)
-  const passiveFactKws = ['資訊查核', '事實查核', '影片核實', '查核', '核實', '真偽', '造謠', '闢謠', '假的', '真的嗎', '真的假的', '假訊息', '不實'];
-  const passiveSummaryKws = ['影片整理', '影片大綱', '內容摘要', '內容整理'];
-  const passiveScamKws = ['詐騙', '釣魚', '可疑', '安全嗎', '安不安全', '有沒有詐騙', '網址查核'];
-
-  const hasPassiveFact = passiveFactKws.some(kw => userText.includes(kw));
-  const hasPassiveSummary = passiveSummaryKws.some(kw => userText.includes(kw));
-  const hasPassiveScam = passiveScamKws.some(kw => userText.includes(kw));
-
-  // 若在群組或多人聊天室中：必須「主動 TAG/提及機器人」或「命中被動關鍵字」才觸發
-  // 避免群組成員日常分享連結或一般閒聊時被機器人過度干擾打擾
-  if (!isDirectChat && !isTaggedBot && !hasPassiveFact && !hasPassiveSummary && !hasPassiveScam) {
+  // 【嚴格防擾】若在群組或多人聊天室中：全部情境一律必須主動 @ 機器人（LINE 原生 @提及 或輸入 @AI / @bot）才會觸發
+  // 徹底取消所有被動關鍵字監聽，100% 杜絕群組日常閒聊、轉發新聞、防詐宣導或教學說明時的誤觸與插話
+  if (!isDirectChat && !isTaggedBot) {
     return;
   }
 
@@ -187,33 +173,17 @@ function processMessage(event) {
     hasSpecializedHit = true;
   }
 
-  // 模式 A：【使用者主動 TAG BOT (或一對一私訊)】
-  // 若已命中高度專門的即時數據 (如發票、油價、停車、急診、交通)，無須額外爬取 DuckDuckGo 與 Cofacts 闢謠庫，避免雜訊干擾
+  // 5-B. 深度聯網多方檢索與權威資訊 (DuckDuckGo + Cofacts)
+  // 若已命中高度專門的即時數據 (如發票、油價、停車、急診、交通)，無須額外爬取闢謠庫，避免雜訊干擾
   // 僅在「未命中專屬數據」或「使用者明確提出質疑、查證、謠言、新聞原因」時才進行深度網路檢索
-  if (isTaggedBot) {
-    const isSeekingFactCheckOrNews = /真的假的|真假|假訊息|假消息|謠言|闢謠|騙人|詐騙|新聞|時事|為什麼|原因|內幕|背景/i.test(cleanUserText);
-    if (!hasSpecializedHit || isSeekingFactCheckOrNews) {
-      const searchQuery = extractSearchQuery(cleanUserText);
-      if (searchQuery) {
-        const searchResult = getDeepFactCheckContext(searchQuery);
-        enrichedPrompt += `\n【即時網路多方檢索與權威資訊 (DuckDuckGo + Cofacts)】\n${searchResult.contextText}\n`;
-        if (searchResult.sources) {
-          searchResult.sources.forEach(src => {
-            if (!factSources.some(s => s.url === src.url)) factSources.push(src);
-          });
-        }
-      }
-    }
-  }
-  // 模式 B：【未 TAG BOT，但命中了事實查核被動關鍵字】
-  // ➔ 針對問題內容進行事實查核檢索
-  else if (hasPassiveFact) {
-    const factQuery = extractSearchQuery(cleanUserText);
-    if (factQuery) {
-      const factResult = getDeepFactCheckContext(factQuery);
-      enrichedPrompt += `\n【免帳號深度事實查證依據 (Cofacts 闢謠庫 + 多方權威來源 + 深度內文)】\n${factResult.contextText}\n`;
-      if (factResult.sources) {
-        factResult.sources.forEach(src => {
+  const isSeekingFactCheckOrNews = /真的假的|真假|假訊息|假消息|謠言|闢謠|騙人|詐騙|新聞|時事|為什麼|原因|內幕|背景/i.test(cleanUserText);
+  if (!hasSpecializedHit || isSeekingFactCheckOrNews) {
+    const searchQuery = extractSearchQuery(cleanUserText);
+    if (searchQuery) {
+      const searchResult = getDeepFactCheckContext(searchQuery);
+      enrichedPrompt += `\n【即時網路多方檢索與權威資訊 (DuckDuckGo + Cofacts)】\n${searchResult.contextText}\n`;
+      if (searchResult.sources) {
+        searchResult.sources.forEach(src => {
           if (!factSources.some(s => s.url === src.url)) factSources.push(src);
         });
       }
