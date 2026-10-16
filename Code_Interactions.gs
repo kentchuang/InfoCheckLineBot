@@ -1,6 +1,6 @@
 /**
  * AI 資訊查核助手 LINE Bot (Interactions API 智能版)
- * 版別：v2026.09.28.02-interactions-invoice-fix
+ * 版別：v2026.10.16.01-interactions-doh-anti-phishing
  * 部署環境: Google Apps Script (GAS)
  *
  * [架構設計說明]
@@ -151,16 +151,30 @@ function processMessage(event) {
   let enrichedPrompt = `【系統當前時間 (台灣時區)】${taiwanTimeStr}\n使用者問題/需求：\n${cleanUserText}\n\n`;
   let factSources = [];
 
-  // 若包含網址，先抓取網址背景資訊 (YouTube oEmbed 或 網頁預覽/防詐評分)
+  // 若包含網址，先抓取網址背景資訊 (YouTube oEmbed 或 DNS 鑑識/網頁預覽/防詐評分)
   if (urlMatch) {
     const targetUrl = urlMatch[0];
     if (isYoutubeUrl(targetUrl)) {
       const ytInfo = fetchYoutubeInfo(targetUrl);
       enrichedPrompt += `【附加 YouTube 影片資訊】\n${ytInfo}\n`;
     } else {
-      const riskScore = analyzeUrlRisk(targetUrl);
-      const pagePreview = fetchWebPageContext(targetUrl);
-      enrichedPrompt += `【附加網址分析資訊】\n待檢測網址：${targetUrl}\n靜態風險分數：${riskScore}分\n網頁內容預覽：\n${pagePreview}\n`;
+      // 1. 解析最終跳轉落地網址 (避免短網址遮蔽真實網域)
+      const finalUrl = resolveFinalDestination(targetUrl);
+      const parsedFinal = parseUrlSafe(finalUrl);
+      const targetHost = parsedFinal ? parsedFinal.hostname : "";
+
+      // 2. 執行 DoH (DNS-over-HTTPS) 預檢解析 (存活度與資安威脅情報過濾)
+      const dnsInfo = queryDnsOverHttps(targetHost);
+
+      // 3. 靜態風險與網頁內容分析
+      const riskScore = analyzeUrlRisk(finalUrl, dnsInfo);
+      const pagePreview = fetchWebPageContext(finalUrl, dnsInfo);
+
+      let dnsDesc = `DNS 狀態：${dnsInfo.status}`;
+      if (dnsInfo.ips && dnsInfo.ips.length > 0) dnsDesc += ` (IP: ${dnsInfo.ips.slice(0, 2).join(', ')})`;
+      if (dnsInfo.securityNote) dnsDesc += ` - ${dnsInfo.securityNote}`;
+
+      enrichedPrompt += `【附加網址分析資訊】\n原始網址：${targetUrl}\n${finalUrl !== targetUrl ? `最終落地網址：${finalUrl}\n` : ''}${dnsDesc}\n靜態風險分數：${riskScore}分\n網頁內容預覽：\n${pagePreview}\n`;
     }
   }
 
@@ -411,7 +425,7 @@ function isTrustedDomain(hostname) {
   // 4. 知名社群與通用官方跳轉
   const trustedSocial = [
     'line.me', 'lin.ee', 'page.line.me',
-    'facebook.com', 'fb.me', 'fb.com',
+    'facebook.com', 'fb.me', 'fb.com', 'fb.watch', 'fb.gg',
     'instagram.com', 'threads.net', 'threads.com',
     'x.com', 'twitter.com', 't.co',
     'tiktok.com', 'github.com',
@@ -424,11 +438,154 @@ function isTrustedDomain(hostname) {
 }
 
 /**
- * 詐騙網址靜態風險評分
+ * 追蹤解析短網址或 HTTP 跳轉，取得真實最終落地網址 (支援最多 3 層重定向)
+ * @param {string} url - 原始網址
+ * @param {number} [maxRedirects=3] - 最大跳轉次數
+ * @return {string} 最終落地網址
+ */
+function resolveFinalDestination(url, maxRedirects) {
+  if (!url || typeof url !== 'string') return url;
+  const limit = maxRedirects || 3;
+  let currentUrl = url;
+
+  for (let i = 0; i < limit; i++) {
+    try {
+      const response = UrlFetchApp.fetch(currentUrl, {
+        method: 'get',
+        followRedirects: false,
+        muteHttpExceptions: true,
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" }
+      });
+      const code = response.getResponseCode();
+      if ([301, 302, 303, 307, 308].includes(code)) {
+        const headers = response.getAllHeaders();
+        const location = headers['Location'] || headers['location'];
+        if (location) {
+          if (location.startsWith('http://') || location.startsWith('https://')) {
+            currentUrl = location;
+          } else if (location.startsWith('/')) {
+            const parsed = parseUrlSafe(currentUrl);
+            if (parsed) {
+              currentUrl = `${parsed.protocol}//${parsed.hostname}${location}`;
+            }
+          }
+          continue;
+        }
+      }
+    } catch (e) {
+      break;
+    }
+    break;
+  }
+  return currentUrl;
+}
+
+/**
+ * 透過 DoH (DNS over HTTPS) 進行網域解析與資安威脅情資過濾
+ * 結合 Cloudflare 1.1.1.2 資安防護 DNS 與 Google Public DNS 備援
+ * @param {string} hostname - 欲解析之網域名稱
+ * @return {Object} { status: 'OK'|'NXDOMAIN'|'BLOCKED_MALICIOUS'|'UNKNOWN', ips: string[], cnames: string[], isBlocked: boolean, isNxdomain: boolean, securityNote: string }
+ */
+function queryDnsOverHttps(hostname) {
+  const result = {
+    status: 'UNKNOWN',
+    ips: [],
+    cnames: [],
+    isBlocked: false,
+    isNxdomain: false,
+    securityNote: ''
+  };
+
+  if (!hostname || typeof hostname !== 'string') return result;
+
+  const cleanHost = hostname.replace(/:\d+$/, '').trim().toLowerCase();
+  if (!cleanHost || cleanHost === 'localhost' || cleanHost === '127.0.0.1') return result;
+
+  // 1. 優先查詢 Cloudflare 資安過濾 DoH (1.1.1.2 自動攔截惡意與釣魚網站)
+  try {
+    const cfUrl = `https://security.cloudflare-dns.com/dns-query?name=${encodeURIComponent(cleanHost)}&type=A`;
+    const response = UrlFetchApp.fetch(cfUrl, {
+      method: 'get',
+      headers: { 'Accept': 'application/dns-json' },
+      muteHttpExceptions: true
+    });
+
+    if (response.getResponseCode() === 200) {
+      const data = JSON.parse(response.getContentText());
+      if (data.Status === 3) {
+        result.status = 'NXDOMAIN';
+        result.isNxdomain = true;
+        result.securityNote = '網域名稱不存在或已被註銷 (NXDOMAIN)';
+        return result;
+      }
+
+      if (data.Answer && Array.isArray(data.Answer)) {
+        data.Answer.forEach(ans => {
+          if (ans.type === 1 && ans.data) {
+            result.ips.push(ans.data);
+            if (ans.data === '0.0.0.0') {
+              result.isBlocked = true;
+            }
+          } else if (ans.type === 5 && ans.data) {
+            result.cnames.push(ans.data.replace(/\.$/, ''));
+          }
+        });
+
+        if (result.isBlocked) {
+          result.status = 'BLOCKED_MALICIOUS';
+          result.securityNote = '國際資安威脅情報 (Cloudflare Security) 判定為惡意/釣魚黑名單已攔截';
+          return result;
+        }
+
+        if (result.ips.length > 0) {
+          result.status = 'OK';
+          result.securityNote = 'DNS 解析正常';
+          return result;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Cloudflare DoH 查詢異常，嘗試 Google DNS 備援:', err);
+  }
+
+  // 2. 備援查詢：Google Public DNS
+  try {
+    const googleUrl = `https://dns.google/resolve?name=${encodeURIComponent(cleanHost)}&type=A`;
+    const res = UrlFetchApp.fetch(googleUrl, { muteHttpExceptions: true });
+    if (res.getResponseCode() === 200) {
+      const gData = JSON.parse(res.getContentText());
+      if (gData.Status === 3) {
+        result.status = 'NXDOMAIN';
+        result.isNxdomain = true;
+        result.securityNote = '網域名稱不存在或已被註銷 (NXDOMAIN)';
+        return result;
+      }
+      if (gData.Answer && Array.isArray(gData.Answer)) {
+        gData.Answer.forEach(ans => {
+          if (ans.type === 1 && ans.data) result.ips.push(ans.data);
+          if (ans.type === 5 && ans.data) result.cnames.push(ans.data.replace(/\.$/, ''));
+        });
+        if (result.ips.length > 0) {
+          result.status = 'OK';
+          result.securityNote = 'DNS 解析正常 (Google DNS)';
+          return result;
+        }
+      }
+    }
+  } catch (err2) {
+    console.error('DNS DoH 備援查詢失敗:', err2);
+  }
+
+  return result;
+}
+
+/**
+ * 詐騙網址靜態風險評分 (結合 DNS 鑑識情報)
  * @param {string} url - 待檢測網址
+ * @param {Object} [dnsInfo] - DNS 鑑識分析結果
  * @return {number} riskScore - 風險點數 (70 分以上為高風險)
  */
-function analyzeUrlRisk(url) {
+function analyzeUrlRisk(url, dnsInfo) {
   let riskScore = 0;
   try {
     const parsed = parseUrlSafe(url);
@@ -439,6 +596,12 @@ function analyzeUrlRisk(url) {
     // A. 命中官方信任白名單，且無山寨特徵，直接評定為 0 分安全
     if (isTrustedDomain(hostname)) {
       return 0;
+    }
+
+    // B. DNS 威脅情資加權
+    if (dnsInfo) {
+      if (dnsInfo.isBlocked) riskScore += 90; // 國際資安威脅黑名單
+      if (dnsInfo.isNxdomain) riskScore += 80; // 不存在的假網域或已被扣押
     }
 
     // 1. 高風險 TLD (+40)
@@ -485,15 +648,26 @@ function isSafePublicUrl(url) {
 }
 
 /**
- * 即時抓取網頁內容作為 AI 研判依據 (內建 SSRF 安全防禦與關鍵資安特徵偵測)
+ * 即時抓取網頁內容作為 AI 研判依據 (內建 SSRF 安全防禦、DNS 結果聯防與精確表單特徵偵測)
+ * @param {string} url - 目標網址
+ * @param {Object} [dnsInfo] - DNS 檢驗結果
+ * @return {string} 預覽內容與特徵分析
  */
-function fetchWebPageContext(url) {
+function fetchWebPageContext(url, dnsInfo) {
   if (!isSafePublicUrl(url)) {
     return "[安全攔截] 該網址為內部私有 IP 或非公開 HTTP/HTTPS 位址。";
   }
 
   const parsed = parseUrlSafe(url);
   const isTrusted = parsed && isTrustedDomain(parsed.hostname);
+
+  // 若 DNS 已判定為資安封鎖或無效網域，無須進行危險爬取
+  if (dnsInfo && dnsInfo.isBlocked) {
+    return `[資安攔截] 該網址已被安全 DNS (Cloudflare Security) 封鎖，判定為惡意軟體或釣魚詐騙黑名單。`;
+  }
+  if (dnsInfo && dnsInfo.isNxdomain) {
+    return `[無效網址] 該網域名稱無法透過 DNS 解析 (NXDOMAIN)，伺服器不存在或已被註銷。`;
+  }
 
   try {
     const response = UrlFetchApp.fetch(url, {
@@ -521,18 +695,28 @@ function fetchWebPageContext(url) {
     }
 
     // 檢查是否有要求輸入高危敏感資訊的表單欄位
-    // 注意：必須先將 <script> 和 <style> 剝離，避免掃描到 SPA 前端打包的 JS SDK、分析庫或變數名稱
+    // 嚴格比對：只針對真正要求輸入資料的 input 欄位屬性或相鄰 label，避免頁面內文(如隱私條款/防詐提醒)誤觸假陽性
     const htmlNoScripts = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '');
     const sensitiveInputs = [];
-    if (/(creditcard|card.?num|cvv|cvc|安全碼|有效月年|信用卡號)/i.test(htmlNoScripts) && /(<input|<form|<label)/i.test(htmlNoScripts)) {
+
+    const creditCardInputRegex = /<input[^>]+(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*(?:creditcard|card.?num|cvv|cvc|安全碼|信用卡號|有效月年)[^"']*["']/i;
+    const creditCardLabelRegex = /<label[^>]*>[^<]*(?:信用卡號|安全碼|CVV|CVC)[^<]*<\/label>[\s\S]{0,80}<input/i;
+    if (creditCardInputRegex.test(htmlNoScripts) || creditCardLabelRegex.test(htmlNoScripts)) {
       sensitiveInputs.push("信用卡資訊");
     }
-    if (/(網銀密碼|銀行密碼|提款密碼|轉帳密碼)/i.test(htmlNoScripts) && /(<input|<form|<label)/i.test(htmlNoScripts)) {
+
+    const bankPassInputRegex = /<input[^>]+(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*(?:bank.?pass|網銀密碼|銀行密碼|提款密碼|轉帳密碼)[^"']*["']/i;
+    const bankPassLabelRegex = /<label[^>]*>[^<]*(?:網銀密碼|銀行密碼|提款密碼|轉帳密碼)[^<]*<\/label>[\s\S]{0,80}<input/i;
+    if (bankPassInputRegex.test(htmlNoScripts) || bankPassLabelRegex.test(htmlNoScripts)) {
       sensitiveInputs.push("網路銀行密碼");
     }
-    if (/(otp|手機動態碼)/i.test(htmlNoScripts) && !/(turnstile|recaptcha|hcaptcha)/i.test(htmlNoScripts) && /(<input|<form|<label)/i.test(htmlNoScripts)) {
+
+    const otpInputRegex = /<input[^>]+(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*(?:otp|sms.?code|動態碼|簡訊驗證碼)[^"']*["']/i;
+    const otpLabelRegex = /<label[^>]*>[^<]*(?:動態簡訊驗證碼|簡訊動態碼|手機驗證碼)[^<]*<\/label>[\s\S]{0,80}<input/i;
+    if (!/(turnstile|recaptcha|hcaptcha)/i.test(htmlNoScripts) && (otpInputRegex.test(htmlNoScripts) || otpLabelRegex.test(htmlNoScripts))) {
       sensitiveInputs.push("動態簡訊驗證碼");
     }
+
     if (sensitiveInputs.length > 0 && !isTrusted) {
       features.push(`⚠️ 頁面包含敏感輸入表單：${sensitiveInputs.join('、')}`);
     }
@@ -843,6 +1027,7 @@ function callGeminiInteractionsAPI(inputContent) {
 ▶ 情境 1：網址資安偵測（詐騙、釣魚、可疑連結）
 - 燈號：🟢 官方安全連結 / 🟡 中風險需留意 / 🔴 高風險詐騙
 - 格式：[燈號] [核心結論：說明是否為官方正規網址/跳轉，是否有索取信用卡或帳密風險，告訴使用者該怎麼做]
+- 準則：若附加分析標註「官方認證網域」且 DNS 解析正常，即為安全官方服務或正常社群分享（如 Threads、Facebook、Instagram、YouTube 貼文等），切勿過度判定為高風險詐騙。若 DNS 遭國際資安情資封鎖或為無效網域 (NXDOMAIN)，則予以嚴格警示。
 
 ▶ 情境 2：訊息或謠言事實查核（長輩圖、謠傳、時事真偽）
 - 燈號：🔴 錯誤謠言 / 🟡 部分不實(存疑) / 🟢 屬實訊息
