@@ -123,8 +123,12 @@ function processMessage(event) {
   // 4. 喚醒與觸發判斷
   const isDirectChat = sourceType === 'user'; // 是否為一對一私訊
   const urlMatch = userText.match(/https?:\/\/[^\s]+/);
-  // 精準喚醒：支援 @AI、@ai、@Ai、@Bot、@bot（不分大小寫），且後方需為冒號、逗號、空格或結尾，100% 防止 Email (如 abc@gmail.com, test@ai.com) 誤觸
-  const isMentioned = !!(event.message.mention && event.message.mention.mentionees && event.message.mention.mentionees.length > 0);
+  // 精準喚醒：支援 LINE 原生 @提及機器人（需判定 isSelf 為 true）、以及手動輸入 @AI、@ai、@Ai、@Bot、@bot
+  const isMentioned = !!(
+    event.message.mention &&
+    event.message.mention.mentionees &&
+    event.message.mention.mentionees.some(m => m.isSelf === true)
+  );
   const hasCallTag = /(?:^|\s)@(ai|bot)(?:[:：\s,，]|$)/i.test(userText);
   const isTaggedBot = isMentioned || hasCallTag; // 使用者是否主動 TAG 呼叫機器人
 
@@ -408,7 +412,9 @@ function isTrustedDomain(hostname) {
   const trustedSocial = [
     'line.me', 'lin.ee', 'page.line.me',
     'facebook.com', 'fb.me', 'fb.com',
-    'instagram.com', 'threads.net',
+    'instagram.com', 'threads.net', 'threads.com',
+    'x.com', 'twitter.com', 't.co',
+    'tiktok.com', 'github.com',
     'youtube.com', 'youtu.be',
     'google.com', 'google.com.tw', 'goo.gl', 'g.co'
   ];
@@ -515,21 +521,28 @@ function fetchWebPageContext(url) {
     }
 
     // 檢查是否有要求輸入高危敏感資訊的表單欄位
+    // 注意：必須先將 <script> 和 <style> 剝離，避免掃描到 SPA 前端打包的 JS SDK、分析庫或變數名稱
+    const htmlNoScripts = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '');
     const sensitiveInputs = [];
-    if (/(creditcard|card.?num|cvv|cvc|安全碼|有效月年|信用卡號)/i.test(html)) sensitiveInputs.push("信用卡資訊");
-    if (/(網銀密碼|銀行密碼|提款密碼|轉帳密碼)/i.test(html)) sensitiveInputs.push("網路銀行密碼");
-    if (/(otp|手機動態碼)/i.test(html) && !/(turnstile|recaptcha|hcaptcha)/i.test(html)) sensitiveInputs.push("動態簡訊驗證碼");
+    if (/(creditcard|card.?num|cvv|cvc|安全碼|有效月年|信用卡號)/i.test(htmlNoScripts) && /(<input|<form|<label)/i.test(htmlNoScripts)) {
+      sensitiveInputs.push("信用卡資訊");
+    }
+    if (/(網銀密碼|銀行密碼|提款密碼|轉帳密碼)/i.test(htmlNoScripts) && /(<input|<form|<label)/i.test(htmlNoScripts)) {
+      sensitiveInputs.push("網路銀行密碼");
+    }
+    if (/(otp|手機動態碼)/i.test(htmlNoScripts) && !/(turnstile|recaptcha|hcaptcha)/i.test(htmlNoScripts) && /(<input|<form|<label)/i.test(htmlNoScripts)) {
+      sensitiveInputs.push("動態簡訊驗證碼");
+    }
     if (sensitiveInputs.length > 0 && !isTrusted) {
       features.push(`⚠️ 頁面包含敏感輸入表單：${sensitiveInputs.join('、')}`);
     }
 
     // 檢查是否有官方 App 深層連結 (Deep Link)
-    if (/(uniopenapp\.page\.link|shopeetw:\/\/|line:\/\/|openpoint)/i.test(html)) {
+    if (/(uniopenapp\.page\.link|shopeetw:\/\/|line:\/\/|openpoint)/i.test(htmlNoScripts)) {
       features.push("🔗 整合官方 App 深度跳轉/歸戶機制");
     }
 
-    const cleanBody = html.replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
+    const cleanBody = htmlNoScripts
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()

@@ -7,3 +7,7 @@ node_modules/
 skills-lock.json
 docs/
 tests/
+
+# clasp 設定檔與憑證（防止私有 Script ID 與憑證推送到 GitHub）
+.clasp.json
+.clasprc.json

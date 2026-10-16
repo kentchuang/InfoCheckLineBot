@@ -1,0 +1,13 @@
+{
+  "name": "info-check-line-bot",
+  "version": "1.0.0",
+  "description": "AI 資訊查核 LINE Bot (Google Apps Script)",
+  "scripts": {
+    "push": "npx @google/clasp push",
+    "watch": "npx @google/clasp push --watch",
+    "deploy": "npx @google/clasp deploy"
+  },
+  "devDependencies": {
+    "@google/clasp": "^3.4.1"
+  }
+}
