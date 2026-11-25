@@ -300,7 +300,56 @@ function processMessage(event) {
   }
 
   // 6. 呼叫 Interactions API（由 AI 自行判斷意圖，輸出極簡「燈號 + 最終結論」，支援圖片多模態）
-  const aiResponse = callGeminiInteractionsAPI(enrichedPrompt, attachedImage);
+  let aiResponse = callGeminiInteractionsAPI(enrichedPrompt, attachedImage);
+  let usedDdgFallback = false;
+  let emergencyDdgResults = null;
+
+  // 6-A. 緊急底線 1（Grounding 失敗降級）：當開啟 Grounding 但呼叫失敗時，自動拔掉 google_search 工具，
+  //      強制啟用 DuckDuckGo 抓取摘要並改由純 Gemini 模型回答（平時成功不觸發，零額外延遲）
+  if ((!aiResponse || !aiResponse.ok) && ENABLE_GROUNDING) {
+    const fallbackQuery = extractSearchQuery(cleanUserText);
+    let fallbackPrompt = enrichedPrompt;
+    if (fallbackQuery) {
+      emergencyDdgResults = searchDuckDuckGo(fallbackQuery, true);
+      if (emergencyDdgResults.length > 0) {
+        let ddgContext = "\n【緊急備援網路檢索 (DuckDuckGo)】\n";
+        emergencyDdgResults.slice(0, 3).forEach((item, idx) => {
+          ddgContext += `[來源 ${idx + 1}] ${item.title}\n網址：${item.url}\n摘要：${item.snippet}\n\n`;
+        });
+        fallbackPrompt += ddgContext;
+      }
+    }
+    const retryResponse = callGeminiInteractionsAPI(fallbackPrompt, attachedImage, { disableGrounding: true });
+    if (retryResponse && retryResponse.ok) {
+      aiResponse = retryResponse;
+      usedDdgFallback = true;
+      if (emergencyDdgResults && emergencyDdgResults.length > 0) {
+        emergencyDdgResults.slice(0, 2).forEach(item => {
+          if (!factSources.some(s => s.url === item.url)) {
+            factSources.push({ title: item.title, url: item.url });
+          }
+        });
+      }
+    }
+  }
+
+  // 6-B. 緊急底線 2（AI 全滅純搜尋保底）：若所有 Gemini 模型皆失敗，直接回傳 DuckDuckGo 即時搜尋結果
+  if (!aiResponse || !aiResponse.ok) {
+    const fallbackQuery = extractSearchQuery(cleanUserText);
+    if (fallbackQuery && emergencyDdgResults === null) {
+      emergencyDdgResults = searchDuckDuckGo(fallbackQuery, true);
+    }
+    if (emergencyDdgResults && emergencyDdgResults.length > 0) {
+      let ddgMsg = "⚠️ AI 模型暫時繁忙，以下為即時網路搜尋結果（DuckDuckGo 緊急備援）：";
+      emergencyDdgResults.slice(0, 3).forEach((item, idx) => {
+        const snippetLine = item.snippet ? `\n${item.snippet.substring(0, 120)}` : '';
+        ddgMsg += `\n\n${idx + 1}. ${item.title}${snippetLine}\n🔗 ${item.url}`;
+      });
+      replyToLine(replyToken, ddgMsg);
+      return;
+    }
+  }
+
   if (aiResponse && aiResponse.text) {
     let finalMessage = aiResponse.text.trim();
 
@@ -318,7 +367,7 @@ function processMessage(event) {
 
     // 附上判別回應模型資訊
     if (aiResponse.model) {
-      finalMessage += `\n\n🤖 模型：${aiResponse.model}`;
+      finalMessage += `\n\n🤖 模型：${aiResponse.model}${usedDdgFallback ? ' (DDG備援)' : ''}`;
     }
 
     replyToLine(replyToken, finalMessage);
@@ -877,8 +926,8 @@ function fetchWebPageContext(url, dnsInfo) {
  * @param {string} query 搜尋關鍵字
  * @return {Array<Object>} 排序後的搜尋結果
  */
-function searchDuckDuckGo(query) {
-  if (!ENABLE_DUCKDUCKGO) return [];
+function searchDuckDuckGo(query, forceEnable) {
+  if (!ENABLE_DUCKDUCKGO && !forceEnable) return [];
   const results = [];
   try {
     const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
@@ -1285,8 +1334,9 @@ function getDynamicFallbackModels() {
  * 呼叫 Gemini Interactions API (統一 Agent 提示詞 + Web Search 工具支援 + 圖片多模態 + 動態多模型降級)
  * @param {string} inputContent - 文字提示與背景上下文
  * @param {Object|null} [imageData] - 選用之圖片資料 { mimeType, data (base64) }
+ * @param {Object} [optionsOverride] - 選用覆寫設定，如 { disableGrounding: true }
  */
-function callGeminiInteractionsAPI(inputContent, imageData) {
+function callGeminiInteractionsAPI(inputContent, imageData, optionsOverride) {
   // 統整型 Agent 指示詞：由 AI 自主根據輸入內容判定意圖，極簡輸出「燈號 + 最終結論」
   const UNIFIED_AGENT_INSTRUCTION = `
 你是一位具備資安鑑識、事實查核與生活知識顧問能力的「專業 AI 助手」。
@@ -1332,6 +1382,8 @@ function callGeminiInteractionsAPI(inputContent, imageData) {
     });
   }
 
+  const useGrounding = ENABLE_GROUNDING && !(optionsOverride && optionsOverride.disableGrounding);
+
   const payload = {
     "contents": [{
       "parts": parts
@@ -1341,11 +1393,11 @@ function callGeminiInteractionsAPI(inputContent, imageData) {
     },
     "generationConfig": {
       "temperature": 0.3,
-      "maxOutputTokens": ENABLE_GROUNDING ? 4096 : 1024
+      "maxOutputTokens": useGrounding ? 4096 : 2048
     }
   };
 
-  if (ENABLE_GROUNDING) {
+  if (useGrounding) {
     payload["tools"] = [{
       "google_search": {}
     }];
@@ -1379,8 +1431,8 @@ function callGeminiInteractionsAPI(inputContent, imageData) {
       if (code === 200) {
         let replyText = extractAnyTextFromGemini(json);
         if (replyText) {
-          const groundingSources = ENABLE_GROUNDING ? extractGroundingSources(json) : [];
-          return { text: replyText, model: model, sources: groundingSources };
+          const groundingSources = useGrounding ? extractGroundingSources(json) : [];
+          return { ok: true, text: replyText, model: model, sources: groundingSources };
         }
       }
 
@@ -1403,7 +1455,7 @@ function callGeminiInteractionsAPI(inputContent, imageData) {
     }
   }
 
-  return { text: lastErrorDetail + "\n請稍後再試，或聯絡開發人員。", model: "", sources: [] };
+  return { ok: false, text: lastErrorDetail + "\n請稍後再試，或聯絡開發人員。", model: "", sources: [] };
 }
 
 /**

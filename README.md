@@ -67,7 +67,7 @@
 `Code_Interactions.gs` 採用 **Gemini 原生 Google Search Grounding** 與 **Cofacts 闢謠庫** 雙軌查證，並支援群組圖片多模態判讀：
 
 1. **Google Search Grounding (`ENABLE_GROUNDING = true`)**：透過 `tools: [{ "google_search": {} }]` 由 Gemini 自主即時上網查證，並自動萃取 `groundingMetadata.groundingChunks` 附在回覆尾端作為「🔗 求證連結」。
-2. **DuckDuckGo 爬取開關 (`ENABLE_DUCKDUCKGO = false`)**：付費 API Key 模式預設關閉 DuckDuckGo 爬取以降低延遲與失敗率；若有免綁卡需求可手動改回 `true`。
+2. **DuckDuckGo 緊急救援底線 (`ENABLE_DUCKDUCKGO = false`)**：平時預設關閉以達零額外延遲；若 Google Search Grounding 失敗會自動降級改抓 DuckDuckGo 餵給純 Gemini 回答，若所有 Gemini 模型皆失敗則直接回傳 DuckDuckGo 即時搜尋結果保底。
 3. **Cofacts（真的假的）闢謠庫直連**：於明確查核／謠言／新聞提問時以 GraphQL 查詢台灣開源闢謠庫，一般生活提問不觸發以維持低延遲。
 4. **群組／私訊圖片多模態查核**：收到圖片時靜默暫存 `message.id`（30 分鐘）；使用者對任一張圖片按「回覆」並 `@AI`，或於提問中指向最近圖片時，透過 LINE Content API 取得圖片並送交 Gemini 同步看圖與上網查證。
 

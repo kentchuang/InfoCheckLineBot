@@ -157,7 +157,7 @@
    - ⚠️ 切勿直接執行不帶 `-i` 的 `npx @google/clasp deploy`，否則會建立新部署與新網址導致 LINE Webhook 仍指向舊版。
 3. **API Key 與聯網旗標確認**：
    - `GEMINI_API_KEY` 目前使用付費金鑰別名：`antigravityextra`。
-   - `Code_Interactions.gs` 預設 `ENABLE_GROUNDING = true`、`ENABLE_DUCKDUCKGO = false`。
+   - `Code_Interactions.gs` 預設 `ENABLE_GROUNDING = true`、`ENABLE_DUCKDUCKGO = false`（平時不啟用 DuckDuckGo，僅於 Grounding 失敗或 AI 全線異常時自動啟動兩層 DuckDuckGo 緊急救援底線）。
 
 ---
 
