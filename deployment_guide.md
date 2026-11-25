@@ -63,7 +63,8 @@
 | 屬性名稱 (Property) | 必填/選填 | 範例值 | 說明 |
 | :--- | :---: | :--- | :--- |
 | `LINE_ACCESS_TOKEN` | **必填** | `v9a8s7d6f5...` | LINE Messaging API 的長金鑰。 |
-| `GEMINI_API_KEY` | **必填** | `AIzaSy...` | Google AI Studio 申請的 Gemini 金鑰。 |
+| `GEMINI_API_KEY` | **必填** | `AIzaSy...` | Google AI Studio 申請的 Gemini 金鑰（目前付費金鑰別名：`antigravityextra`）。 |
+| `FALLBACK_MODELS` | *選填* | `gemini-3.8-flash,gemini-3.5-flash-lite,gemini-4-hydrogen` | 自訂備援模型順序（逗號或換行分隔，最高優先，免改碼免重部屬）；**留空時會每 6 小時自動透過 `v1beta/models` 發現最新 Stable 模型**。 |
 | `ALLOWED_GROUP_IDS` | *選填* | `C123456..., C789012...` | 授權群組白名單（多個請用半形逗號 `,` 分開；亦可填 `*` 開放所有群組）。 |
 | `ALLOWED_USER_IDS` | *選填* | `U123456..., U789012...` | 授權一對一私訊白名單（多個請用半形逗號 `,` 分開；亦可填 `*` 開放所有人私訊）。**不與群組 ID 混用**。 |
 | `SPREADSHEET_ID` | *選填* | `1BxiMVs0XRA5nFM...` | 僅限 `Code_Interactions.gs` 且希望透過 Google Sheet 管理白名單時填入。 |

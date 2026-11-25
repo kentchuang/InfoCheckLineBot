@@ -1144,7 +1144,145 @@ function formatCitationFootnote(sources) {
 }
 
 /**
- * 呼叫 Gemini Interactions API (統一 Agent 提示詞 + Web Search 工具支援 + 圖片多模態 + 多模型降級)
+ * 靜態保底備援模型清單（僅於手動屬性未設定且自動發現 API 暫時失敗時使用）
+ */
+const DEFAULT_FALLBACK_MODELS = [
+  'gemini-flash-latest',   // 官方熱切換最新 Flash 別名
+  'gemini-3.8-flash',      // 3.8 Flash 正式版
+  'gemini-3.5-flash-lite', // 3.5 Flash-Lite 極速正式版
+  'gemini-4-hydrogen'      // Gemini 4 快速主力正式版
+];
+
+/**
+ * 比較語意版本號字串（例如 "4" > "3.8" > "3.5" > "3.1"），回傳降冪排序值
+ * @param {string} a
+ * @param {string} b
+ * @return {number}
+ */
+function compareVersionDesc(a, b) {
+  const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (pb[i] || 0) - (pa[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/**
+ * 從 Gemini models.list 原始資料中，自動篩選並組裝最新平價高速 Stable 4 階梯清單
+ * 自動排除 preview/exp/舊版/非對話媒體模型與高價旗艦（pro/carbon/neon/argon），避免誤切高價模型
+ * @param {Array<Object>} rawModels - v1beta/models 回傳之 models 陣列
+ * @return {string[]} 排序後的模型 ID 陣列
+ */
+function selectAutoFallbackModels(rawModels) {
+  if (!Array.isArray(rawModels) || rawModels.length === 0) return [];
+
+  const excludeRegex = /(preview|exp|experimental|tts|image|audio|live|veo|lyria|embedding|aqa|robotics|vision|learnlm|computer-use|deep-research|1\.0|1\.5|2\.0|2\.5|pro|carbon|neon|argon|ultra|latest)/i;
+  const flashModels = [];
+  const flashLiteModels = [];
+  const hydrogenModels = [];
+
+  for (const m of rawModels) {
+    if (!m || !m.name) continue;
+    const methods = m.supportedGenerationMethods;
+    if (Array.isArray(methods) && !methods.includes('generateContent')) continue;
+
+    const id = String(m.name).replace(/^models\//, '').trim();
+    if (!id.startsWith('gemini-') || excludeRegex.test(id)) continue;
+
+    const flashMatch = id.match(/^gemini-(\d+(?:\.\d+)?)-flash$/i);
+    if (flashMatch) {
+      flashModels.push({ id, ver: flashMatch[1] });
+      continue;
+    }
+    const liteMatch = id.match(/^gemini-(\d+(?:\.\d+)?)-flash-lite$/i);
+    if (liteMatch) {
+      flashLiteModels.push({ id, ver: liteMatch[1] });
+      continue;
+    }
+    const hydroMatch = id.match(/^gemini-(\d+(?:\.\d+)?)-hydrogen$/i);
+    if (hydroMatch) {
+      hydrogenModels.push({ id, ver: hydroMatch[1] });
+    }
+  }
+
+  flashModels.sort((a, b) => compareVersionDesc(a.ver, b.ver));
+  flashLiteModels.sort((a, b) => compareVersionDesc(a.ver, b.ver));
+  hydrogenModels.sort((a, b) => compareVersionDesc(a.ver, b.ver));
+
+  // 黃金順序：最新 Flash ➔ 最新 Flash-Lite ➔ 最新 Hydrogen ➔ 次新 Flash-Lite
+  const picked = [];
+  const addUnique = (item) => {
+    if (item && item.id && !picked.includes(item.id)) picked.push(item.id);
+  };
+  addUnique(flashModels[0]);
+  addUnique(flashLiteModels[0]);
+  addUnique(hydrogenModels[0]);
+  addUnique(flashLiteModels[1]);
+  if (picked.length < 4) addUnique(flashModels[1]);
+
+  return picked.slice(0, 4);
+}
+
+/**
+ * 三層動態取得備援模型清單：
+ * 1. GAS 指令碼屬性 FALLBACK_MODELS（逗號或換行分隔，手動覆寫最高優先，免改碼免重部屬）
+ * 2. 自動呼叫 v1beta/models 發現最新可用 Stable 模型（CacheService 快取 6 小時）
+ * 3. DEFAULT_FALLBACK_MODELS 靜態保底（100% 永不中斷）
+ * @return {string[]}
+ */
+function getDynamicFallbackModels() {
+  // Layer 1：手動覆寫（GAS 指令碼屬性 FALLBACK_MODELS）
+  try {
+    const rawOverride = PropertiesService.getScriptProperties().getProperty('FALLBACK_MODELS') || '';
+    if (rawOverride.trim()) {
+      const customList = [];
+      rawOverride.split(/[,\n]+/).forEach(item => {
+        const m = item.trim();
+        if (m && !customList.includes(m)) customList.push(m);
+      });
+      if (customList.length > 0) return customList;
+    }
+  } catch (e) {
+    console.warn('讀取 FALLBACK_MODELS 屬性略過:', e);
+  }
+
+  // Layer 2：自動發現最新模型（CacheService 6 小時快取）
+  const cache = CacheService.getScriptCache();
+  const CACHE_KEY = 'DYNAMIC_FALLBACK_MODELS_V1';
+  const cached = cache.get(CACHE_KEY);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch (e) {}
+  }
+
+  if (GEMINI_API_KEY) {
+    try {
+      const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=100&key=${GEMINI_API_KEY}`;
+      const res = UrlFetchApp.fetch(listUrl, { muteHttpExceptions: true });
+      if (res.getResponseCode() === 200) {
+        const data = JSON.parse(res.getContentText());
+        const autoModels = selectAutoFallbackModels(data && data.models);
+        if (autoModels.length > 0) {
+          cache.put(CACHE_KEY, JSON.stringify(autoModels), 21600); // 快取 6 小時
+          return autoModels;
+        }
+      }
+    } catch (err) {
+      console.warn('自動發現 Gemini 模型清單失敗，改用保底清單:', err);
+    }
+  }
+
+  // Layer 3：靜態保底清單
+  return DEFAULT_FALLBACK_MODELS.slice();
+}
+
+/**
+ * 呼叫 Gemini Interactions API (統一 Agent 提示詞 + Web Search 工具支援 + 圖片多模態 + 動態多模型降級)
  * @param {string} inputContent - 文字提示與背景上下文
  * @param {Object|null} [imageData] - 選用之圖片資料 { mimeType, data (base64) }
  */
@@ -1181,13 +1319,8 @@ function callGeminiInteractionsAPI(inputContent, imageData) {
   ▫️ 生活問答：直球給出最核心正確答案。
   `;
 
-  // 備援模型清單 (全面採用官方 Stable 正式版，皆完整支援 Google Search Grounding；已移除棄用的 gemini-2.5-flash 與舊版 preview)
-  const FALLBACK_MODELS = [
-    'gemini-3.8-flash',      // [Tier 1 主力首選] 3.8 Flash 正式版，兼顧速度與事實查核推理品質，支援 Google Search Grounding
-    'gemini-3.5-flash-lite', // [Tier 2 極速防線] 3.5 Flash-Lite 正式版，超低延遲與高性價比，確保 LINE Webhook 絕不逾時
-    'gemini-4-hydrogen',     // [Tier 3 世代備援] Gemini 4 快速主力正式版，大幅降低幻覺 (>5x)，高準確度跨世代備援
-    'gemini-3.1-flash-lite'  // [Tier 4 經濟保底] 3.1 Flash-Lite 正式版，低成本高配額最終保底防線
-  ];
+  // 動態取得備援模型清單（指令碼屬性覆寫 ➔ v1beta/models 自動發現 6h 快取 ➔ 靜態保底）
+  const FALLBACK_MODELS = getDynamicFallbackModels();
 
   const parts = [{ "text": inputContent }];
   if (imageData && imageData.data && imageData.mimeType) {

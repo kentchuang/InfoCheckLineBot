@@ -213,6 +213,7 @@
 3. 點選 **「編輯指令碼屬性」** ➔ **「新增指令碼屬性」**：
    - `LINE_ACCESS_TOKEN`：貼入您的 LINE Token。
    - `GEMINI_API_KEY`：貼入您的 Gemini API Key。
+   - `FALLBACK_MODELS` *(選填)*：自訂模型備援順序（半形逗號分隔，例如 `gemini-3.8-flash,gemini-3.5-flash-lite,gemini-4-hydrogen`）；**留空時系統會每 6 小時自動查詢官方 `v1beta/models` 並選取最新可用 Stable 平價高速模型**。
    - `ALLOWED_GROUP_IDS` *(選填)*：貼入允許的 LINE 群組 ID (多個請用逗號 `,` 分隔；可填 `*` 開放所有群組)。
    - `ALLOWED_USER_IDS` *(選填)*：貼入允許一對一私訊的 LINE 使用者 ID (多個請用逗號 `,` 分隔；可填 `*` 開放所有人私訊)。不與群組 ID 混用。
    - `TDX_CLIENT_ID` *(推薦)*：貼入 TDX Client ID。
