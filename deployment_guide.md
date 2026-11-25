@@ -151,10 +151,10 @@
    }
    ```
    - ⚠️ **`access` 必須是 `ANYONE_ANONYMOUS`（對應 GAS 介面「誰可以存取：所有人」）**；若誤設為 `ANYONE`（任何擁有 Google 帳戶的使用者），LINE Webhook 會被要求登入而完全無法運作！
-2. **使用鎖定 ID 的原地部署指令**：
+2. **使用鎖定 ID 並附帶版本說明的原地部署指令**：
    - 正式 Deployment ID：`AKfycbw6W7bu7kIzakMN8j1cpf-QyXHP_R0HzUjr5x7wD8pUG5N2Iyhv5kZlZXhg6kXPw6SfQA`
-   - 直接執行 `npm run deploy`（會自動執行 `clasp push --force` 並以 `-i <Deployment ID>` 原地更新版本，**絕不產生新網址**）。
-   - ⚠️ 切勿直接執行不帶 `-i` 的 `npx @google/clasp deploy`，否則會建立新部署與新網址導致 LINE Webhook 仍指向舊版。
+   - 執行 `npm run deploy -- "本次更新說明"`（自動執行 `clasp push --force` 並以 `-i <Deployment ID> -d "<說明>"` 原地更新，**絕不產生新網址、絕不出現「未命名」**；若省略參數則自動帶入最新 Git Commit 標題）。
+   - ⚠️ 切勿直接執行不帶 `-i` 與 `-d` 的 `npx @google/clasp deploy`。
 3. **API Key 與聯網旗標確認**：
    - `GEMINI_API_KEY` 目前使用付費金鑰別名：`antigravityextra`。
    - `Code_Interactions.gs` 預設 `ENABLE_GROUNDING = true`、`ENABLE_DUCKDUCKGO = false`（平時不啟用 DuckDuckGo，僅於 Grounding 失敗或 AI 全線異常時自動啟動兩層 DuckDuckGo 緊急救援底線）。

@@ -5,7 +5,7 @@
   "scripts": {
     "push": "npx @google/clasp push --force",
     "watch": "npx @google/clasp push --watch",
-    "deploy": "npx @google/clasp push --force && npx @google/clasp deploy -i AKfycbw6W7bu7kIzakMN8j1cpf-QyXHP_R0HzUjr5x7wD8pUG5N2Iyhv5kZlZXhg6kXPw6SfQA"
+    "deploy": "node scripts/deploy.js"
   },
   "devDependencies": {
     "@google/clasp": "^3.4.1"
