@@ -138,6 +138,26 @@
 - **網頁應用程式網址 (Web App URL) 完全不變**。
 - **LINE Developers 後台完全不用重新設定**，機器人即可直接響應最新功能！
 
+### ⚡ Clasp CLI 原地部署與必檢清單（防失誤守則）
+
+本專案已透過 `package.json` 鎖定正式部署 ID，未來使用終端機部署請務必遵守以下檢查：
+
+1. **檢查 `appsscript.json` 存取權限（最關鍵！）**：
+   ```json
+   "webapp": {
+     "executeAs": "USER_DEPLOYING",
+     "access": "ANYONE_ANONYMOUS"
+   }
+   ```
+   - ⚠️ **`access` 必須是 `ANYONE_ANONYMOUS`（對應 GAS 介面「誰可以存取：所有人」）**；若誤設為 `ANYONE`（任何擁有 Google 帳戶的使用者），LINE Webhook 會被要求登入而完全無法運作！
+2. **使用鎖定 ID 的原地部署指令**：
+   - 正式 Deployment ID：`AKfycbw6W7bu7kIzakMN8j1cpf-QyXHP_R0HzUjr5x7wD8pUG5N2Iyhv5kZlZXhg6kXPw6SfQA`
+   - 直接執行 `npm run deploy`（會自動執行 `clasp push --force` 並以 `-i <Deployment ID>` 原地更新版本，**絕不產生新網址**）。
+   - ⚠️ 切勿直接執行不帶 `-i` 的 `npx @google/clasp deploy`，否則會建立新部署與新網址導致 LINE Webhook 仍指向舊版。
+3. **API Key 與聯網旗標確認**：
+   - `GEMINI_API_KEY` 目前使用付費金鑰別名：`antigravityextra`。
+   - `Code_Interactions.gs` 預設 `ENABLE_GROUNDING = true`、`ENABLE_DUCKDUCKGO = false`。
+
 ---
 
 ## 6. 功能驗證與測試指令大全

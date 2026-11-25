@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "AI 資訊查核 LINE Bot (Google Apps Script)",
   "scripts": {
-    "push": "npx @google/clasp push",
+    "push": "npx @google/clasp push --force",
     "watch": "npx @google/clasp push --watch",
-    "deploy": "npx @google/clasp deploy"
+    "deploy": "npx @google/clasp push --force && npx @google/clasp deploy -i AKfycbw6W7bu7kIzakMN8j1cpf-QyXHP_R0HzUjr5x7wD8pUG5N2Iyhv5kZlZXhg6kXPw6SfQA"
   },
   "devDependencies": {
     "@google/clasp": "^3.4.1"
