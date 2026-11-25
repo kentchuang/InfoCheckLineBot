@@ -9,11 +9,12 @@
  * 3. Google Sheet 權限管理：支援透過 Google 試算表控管 User 與 Group 白名單，授權的使用者可直接一對一私訊與 Bot 暢聊。
  * 4. 高效快取機制 (CacheService)：試算表名單快取 10 分鐘，大幅降低延遲並防止 LINE Webhook 逾時。
  * 5. 意圖自動理解與動態排版：由 AI 自動辨識 4 大情境（事實查核、影片整理、詐騙鑑識、生活健康/知識通用問答），並自動生成最適合 LINE 手機閱讀的版面。
- * 6. 官方有效模型梯隊：主力採用 gemini-2.5-flash，次主力 gemini-3-flash-preview，搭配 gemini-3.1-flash-lite-preview 與 gemini-2.5-pro 備援防線。
+ * 6. 官方有效模型梯隊：主力採用 gemini-3.8-flash，極速防線 gemini-3.5-flash-lite，搭配 gemini-4-hydrogen 與 gemini-3.1-flash-lite 正式版備援防線。
  */
 
 // 1. 金鑰與設定讀取 (從 GAS 「指令碼屬性」中讀取)
 const LINE_ACCESS_TOKEN = PropertiesService.getScriptProperties().getProperty('LINE_ACCESS_TOKEN');
+// 目前使用之付費 API Key 別名：antigravityextra
 const GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
 // 權限控管 Google Sheet 的 ID (填入試算表網址中 /d/ 與 /edit 之間的那串英數字)
 const SPREADSHEET_ID = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
@@ -28,10 +29,14 @@ const TDX_CLIENT_SECRET = (PropertiesService.getScriptProperties().getProperty('
 // [向下相容] 若曾設定中央氣象署舊金鑰仍保留讀取支援
 const CWA_API_KEY = (PropertiesService.getScriptProperties().getProperty('CWA_API_KEY') || '').trim();
 
-// 3. 聯網檢索旗標設定 (Google Search Grounding)
-//    ENABLE_GROUNDING = false → 純 AI 訓練資料模式，完全免費 ($0 元)，適合 Free Tier (預設推薦)
-//    ENABLE_GROUNDING = true  → 開啟 Google Search 聯網搜尋（需綁定信用卡，超出免費額度後會計費）
-const ENABLE_GROUNDING = false;
+// 3. 聯網檢索旗標設定 (Google Search Grounding & DuckDuckGo)
+//    ENABLE_GROUNDING  = true  → 開啟 Google Search 聯網搜尋（付費 API Key 推薦，由 Gemini 原生即時檢索）
+//    ENABLE_GROUNDING  = false → 關閉 Google Search 聯網搜尋，純 AI 訓練資料模式
+const ENABLE_GROUNDING = true;
+
+//    ENABLE_DUCKDUCKGO = false → 關閉 DuckDuckGo 網頁爬取檢索（改由 Gemini Google Search Grounding 處理）
+//    ENABLE_DUCKDUCKGO = true  → 開啟 DuckDuckGo 免 Key 網頁爬取檢索
+const ENABLE_DUCKDUCKGO = false;
 
 /**
  * 處理 Web 網頁請求 (提供線上圖文說明手冊)
@@ -58,12 +63,73 @@ function doPost(e) {
     if (!events || events.length === 0) return;
 
     for (const event of events) {
-      if (event.type === 'message' && event.message.type === 'text') {
-        processMessage(event);
+      if (event.type === 'message' && event.message) {
+        if (event.message.type === 'text') {
+          processMessage(event);
+        } else if (event.message.type === 'image') {
+          // 靜默暫存群組/私訊最新圖片 ID，不主動回覆打擾聊天；待使用者回覆該圖或 @AI 追問時才下載判讀
+          cacheIncomingImage(event);
+        }
       }
     }
   } catch (error) {
     console.error('Error in doPost:', error);
+  }
+}
+
+/**
+ * 靜默記錄近期圖片之 LINE Message ID（不下載圖片本體，零延遲、不打擾群組）
+ * @param {Object} event - LINE image message event
+ */
+function cacheIncomingImage(event) {
+  try {
+    if (!event || !event.source || !event.message || !event.message.id) return;
+    const sourceType = event.source.type;
+    const currentId = sourceType === 'user' ? event.source.userId
+                    : sourceType === 'group' ? event.source.groupId
+                    : event.source.roomId;
+    if (!currentId) return;
+
+    const cache = CacheService.getScriptCache();
+    // 暫存 30 分鐘 (1800 秒)，支援剛傳圖後的快速 @AI 追問
+    cache.put(`LAST_IMG_${currentId}`, String(event.message.id), 1800);
+  } catch (err) {
+    console.warn('暫存圖片 ID 略過:', err);
+  }
+}
+
+/**
+ * 透過 LINE Content API 下載圖片並轉為 Gemini 多模態所需之 Base64 物件
+ * 內建 MIME 型別驗證（僅放行 image/*，回覆純文字訊息時自動安全略過）與 10MB 大小防護
+ * @param {string} messageId - LINE 訊息 ID
+ * @return {Object|null} { mimeType: string, data: string } 或 null
+ */
+function fetchLineImageAsBase64(messageId) {
+  if (!messageId || !LINE_ACCESS_TOKEN) return null;
+  try {
+    const url = `https://api-data.line.me/v2/bot/message/${encodeURIComponent(messageId)}/content`;
+    const response = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: { "Authorization": "Bearer " + LINE_ACCESS_TOKEN },
+      muteHttpExceptions: true
+    });
+
+    if (response.getResponseCode() !== 200) return null;
+
+    const blob = response.getBlob();
+    const mimeType = (blob.getContentType() || '').split(';')[0].trim().toLowerCase();
+    if (!mimeType.startsWith('image/')) return null;
+
+    const bytes = blob.getBytes();
+    if (!bytes || bytes.length === 0 || bytes.length > 10 * 1024 * 1024) return null;
+
+    return {
+      mimeType: mimeType,
+      data: Utilities.base64Encode(bytes)
+    };
+  } catch (err) {
+    console.warn('下載 LINE 圖片失敗:', err);
+    return null;
   }
 }
 
@@ -101,7 +167,8 @@ function processMessage(event) {
 3️⃣ 影片整理：@AI ＋ YouTube 網址（例：@AI 幫我整理大綱 https://youtu.be/...）
 4️⃣ 詐騙偵測：@AI ＋ 網址（例：@AI 這網站安全嗎 https://...）
 5️⃣ 路況停車：@Bot ＋ 路況或停車（例：@Bot 台南到新竹即時路況）
-6️⃣ 查詢 ID：輸入 /get_id${urlSection}`;
+6️⃣ 圖片查核：回覆圖片並 @AI ＋ 提問（例：@AI 這張圖是真的嗎？）
+7️⃣ 查詢 ID：輸入 /get_id${urlSection}`;
     replyToLine(replyToken, helpMsg);
     return;
   }
@@ -138,11 +205,8 @@ function processMessage(event) {
     return;
   }
 
-  // 移除 @AI、@bot 或 LINE 原生 @提及標籤，萃取出乾淨的核心提問文字
-  const cleanUserText = userText
-    .replace(/(?:^|\s)@(ai|bot)(?:[:：\s,，]|$)/gi, ' ')
-    .replace(/@[^\s]+\s*/g, ' ')
-    .trim();
+  // 移除 @AI、@bot 或 LINE 原生 @提及標籤（精準依 mentionees 區間切除，避免誤刪 Email 或 @帳號）
+  const cleanUserText = stripBotMention(userText, event.message.mention);
   if (!cleanUserText && !urlMatch) return;
 
   // 5. 整合前置上下文（Context Enrichment）
@@ -191,15 +255,21 @@ function processMessage(event) {
     hasSpecializedHit = true;
   }
 
-  // 5-B. 深度聯網多方檢索與權威資訊 (DuckDuckGo + Cofacts)
+  // 5-B. 深度聯網多方檢索與權威資訊 (Cofacts / DuckDuckGo)
   // 若已命中高度專門的即時數據 (如發票、油價、停車、急診、交通)，無須額外爬取闢謠庫，避免雜訊干擾
-  // 僅在「未命中專屬數據」或「使用者明確提出質疑、查證、謠言、新聞原因」時才進行深度網路檢索
+  // 當 DuckDuckGo 已關閉並改用 Gemini Google Search 時，僅在明確查證/闢謠情境才查詢 Cofacts，避免一般提問增加延遲
   const isSeekingFactCheckOrNews = /真的假的|真假|假訊息|假消息|謠言|闢謠|騙人|詐騙|新聞|時事|為什麼|原因|內幕|背景/i.test(cleanUserText);
-  if (!hasSpecializedHit || isSeekingFactCheckOrNews) {
+  const shouldRunDeepFactCheck = ENABLE_DUCKDUCKGO
+    ? (!hasSpecializedHit || isSeekingFactCheckOrNews)
+    : isSeekingFactCheckOrNews;
+  if (shouldRunDeepFactCheck) {
     const searchQuery = extractSearchQuery(cleanUserText);
     if (searchQuery) {
       const searchResult = getDeepFactCheckContext(searchQuery);
-      enrichedPrompt += `\n【即時網路多方檢索與權威資訊 (DuckDuckGo + Cofacts)】\n${searchResult.contextText}\n`;
+      if (searchResult.hasHit) {
+        const sourceLabel = ENABLE_DUCKDUCKGO ? 'DuckDuckGo + Cofacts' : 'Cofacts 闢謠庫';
+        enrichedPrompt += `\n【即時多方檢索與權威資訊 (${sourceLabel})】\n${searchResult.contextText}\n`;
+      }
       if (searchResult.sources) {
         searchResult.sources.forEach(src => {
           if (!factSources.some(s => s.url === src.url)) factSources.push(src);
@@ -208,10 +278,38 @@ function processMessage(event) {
     }
   }
 
-  // 6. 呼叫 Interactions API（由 AI 自行判斷意圖，輸出極簡「燈號 + 最終結論」）
-  const aiResponse = callGeminiInteractionsAPI(enrichedPrompt);
+  // 5-C. 群組/私訊圖片多模態判讀（優先抓取 LINE 原生「回覆」之圖片，其次於提及圖片指代詞時取近期暫存圖片）
+  let attachedImage = null;
+  const quotedMessageId = event.message.quotedMessageId || '';
+  const isAskingAboutImage = /這張圖|那張圖|上[一面張個]張?圖|剛剛.*圖|剛才.*圖|圖[片中裡內上]|截圖|照片|長輩圖|看圖/i.test(cleanUserText);
+
+  if (quotedMessageId) {
+    attachedImage = fetchLineImageAsBase64(quotedMessageId);
+  }
+  if (!attachedImage && isAskingAboutImage) {
+    const lastImgId = CacheService.getScriptCache().get(`LAST_IMG_${currentId}`);
+    if (lastImgId) {
+      attachedImage = fetchLineImageAsBase64(lastImgId);
+    }
+  }
+
+  if (attachedImage) {
+    enrichedPrompt += `\n【附加圖片資訊】使用者已附上圖片，請直接判讀圖片中的文字、截圖、連結或畫面內容，並結合 Google Search 回答或查證使用者問題。\n`;
+  } else if (isAskingAboutImage) {
+    enrichedPrompt += `\n【系統提示】使用者正在詢問圖片內容，但目前未能取得圖片（可能已超過暫存/LINE 保存期限，或近期未傳送圖片）。請簡短禮貌地請使用者對該圖片按「回覆」並 @AI，或重新傳送一次圖片。\n`;
+  }
+
+  // 6. 呼叫 Interactions API（由 AI 自行判斷意圖，輸出極簡「燈號 + 最終結論」，支援圖片多模態）
+  const aiResponse = callGeminiInteractionsAPI(enrichedPrompt, attachedImage);
   if (aiResponse && aiResponse.text) {
     let finalMessage = aiResponse.text.trim();
+
+    // 合併 Gemini Google Search Grounding 回傳之參考來源
+    if (aiResponse.sources && aiResponse.sources.length > 0) {
+      aiResponse.sources.forEach(src => {
+        if (!factSources.some(s => s.url === src.url)) factSources.push(src);
+      });
+    }
 
     // 若有需求時附上求證連結 (精簡出處)
     if (factSources && factSources.length > 0) {
@@ -225,6 +323,36 @@ function processMessage(event) {
 
     replyToLine(replyToken, finalMessage);
   }
+}
+
+/**
+ * 精準移除 LINE 原生 @提及機器人標籤與手動 @AI/@bot 喚醒詞
+ * 避免誤刪提問內容中的 Email (abc@gmail.com)、程式碼 (@decorator) 或社群帳號 (@user)
+ * @param {string} text - 使用者原始輸入文字
+ * @param {Object} [mention] - LINE Webhook event.message.mention 物件
+ * @return {string} 清理後的核心提問文字
+ */
+function stripBotMention(text, mention) {
+  if (!text) return "";
+  let cleaned = text;
+
+  // 1. 優先依 LINE 原生 mentionees 區間由後往前精準切除 isSelf === true 的機器人提及
+  if (mention && Array.isArray(mention.mentionees)) {
+    const selfMentions = mention.mentionees
+      .filter(m => m && m.isSelf === true && typeof m.index === 'number' && typeof m.length === 'number')
+      .sort((a, b) => b.index - a.index);
+    for (const m of selfMentions) {
+      cleaned = cleaned.slice(0, m.index) + ' ' + cleaned.slice(m.index + m.length);
+    }
+  }
+
+  // 2. 移除手動輸入的 @AI / @bot 喚醒前綴
+  cleaned = cleaned
+    .replace(/(?:^|\s)@(ai|bot)(?:[:：\s,，]|$)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned;
 }
 
 /**
@@ -750,6 +878,7 @@ function fetchWebPageContext(url, dnsInfo) {
  * @return {Array<Object>} 排序後的搜尋結果
  */
 function searchDuckDuckGo(query) {
+  if (!ENABLE_DUCKDUCKGO) return [];
   const results = [];
   try {
     const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
@@ -966,8 +1095,13 @@ function getDeepFactCheckContext(factQuery) {
     }
   }
 
+  const fallbackHint = ENABLE_GROUNDING
+    ? "（目前未命中公開闢謠庫，請善用 Google Search 聯網查證並進行客觀鑑識）"
+    : "（無相關公開闢謠或即時網路檢索結果，請依照既有專業醫學/科普邏輯進行客觀鑑識）";
+
   return {
-    contextText: contextReport || "（無相關公開闢謠或即時網路檢索結果，請依照既有專業醫學/科普邏輯進行客觀鑑識）",
+    hasHit: Boolean(contextReport),
+    contextText: contextReport || fallbackHint,
     sources: sources.slice(0, 2)
   };
 }
@@ -1010,9 +1144,11 @@ function formatCitationFootnote(sources) {
 }
 
 /**
- * 呼叫 Gemini Interactions API (統一 Agent 提示詞 + Web Search 工具支援 + 多模型降級)
+ * 呼叫 Gemini Interactions API (統一 Agent 提示詞 + Web Search 工具支援 + 圖片多模態 + 多模型降級)
+ * @param {string} inputContent - 文字提示與背景上下文
+ * @param {Object|null} [imageData] - 選用之圖片資料 { mimeType, data (base64) }
  */
-function callGeminiInteractionsAPI(inputContent) {
+function callGeminiInteractionsAPI(inputContent, imageData) {
   // 統整型 Agent 指示詞：由 AI 自主根據輸入內容判定意圖，極簡輸出「燈號 + 最終結論」
   const UNIFIED_AGENT_INSTRUCTION = `
 你是一位具備資安鑑識、事實查核與生活知識顧問能力的「專業 AI 助手」。
@@ -1045,36 +1181,40 @@ function callGeminiInteractionsAPI(inputContent) {
   ▫️ 生活問答：直球給出最核心正確答案。
   `;
 
-  // 備援模型清單 (最新正式推薦 ➔ 極速防線 ➔ 經典 Flash ➔ 旗艦 Pro)
-  // 依據 Google 官方最新指示：gemini-2.5-pro 已不對新用戶開放，全面改用 gemini-3 系列！
+  // 備援模型清單 (全面採用官方 Stable 正式版，皆完整支援 Google Search Grounding；已移除棄用的 gemini-2.5-flash 與舊版 preview)
   const FALLBACK_MODELS = [
-    'gemini-3-flash-preview',        // [Tier 1 主力首選] Google 3 世代標準 Flash，速度極快、推論品質高，新用戶完美支援
-    'gemini-3.1-flash-lite-preview', // [Tier 2 極速防線] 超低延遲極速回應，高 RPM，確保 Webhook 絕不逾時
-    'gemini-2.5-flash',              // [Tier 3 穩定備援] 2.5 系列經典 Flash
-    'gemini-3.1-pro-preview'         // [Tier 4 旗艦備援] 官方官方指定取代 2.5-pro 的旗艦模型，深度推理保底
+    'gemini-3.8-flash',      // [Tier 1 主力首選] 3.8 Flash 正式版，兼顧速度與事實查核推理品質，支援 Google Search Grounding
+    'gemini-3.5-flash-lite', // [Tier 2 極速防線] 3.5 Flash-Lite 正式版，超低延遲與高性價比，確保 LINE Webhook 絕不逾時
+    'gemini-4-hydrogen',     // [Tier 3 世代備援] Gemini 4 快速主力正式版，大幅降低幻覺 (>5x)，高準確度跨世代備援
+    'gemini-3.1-flash-lite'  // [Tier 4 經濟保底] 3.1 Flash-Lite 正式版，低成本高配額最終保底防線
   ];
+
+  const parts = [{ "text": inputContent }];
+  if (imageData && imageData.data && imageData.mimeType) {
+    parts.push({
+      "inlineData": {
+        "mimeType": imageData.mimeType,
+        "data": imageData.data
+      }
+    });
+  }
 
   const payload = {
     "contents": [{
-      "parts": [{ "text": inputContent }]
+      "parts": parts
     }],
     "systemInstruction": {
       "parts": [{ "text": UNIFIED_AGENT_INSTRUCTION }]
     },
     "generationConfig": {
       "temperature": 0.3,
-      "maxOutputTokens": 1024
+      "maxOutputTokens": ENABLE_GROUNDING ? 4096 : 1024
     }
   };
 
   if (ENABLE_GROUNDING) {
     payload["tools"] = [{
-      "google_search_retrieval": {
-        "dynamic_retrieval_config": {
-          "mode": "MODE_DYNAMIC",
-          "dynamic_threshold": 0.8
-        }
-      }
+      "google_search": {}
     }];
   }
 
@@ -1106,7 +1246,8 @@ function callGeminiInteractionsAPI(inputContent) {
       if (code === 200) {
         let replyText = extractAnyTextFromGemini(json);
         if (replyText) {
-          return { text: replyText, model: model };
+          const groundingSources = ENABLE_GROUNDING ? extractGroundingSources(json) : [];
+          return { text: replyText, model: model, sources: groundingSources };
         }
       }
 
@@ -1129,7 +1270,35 @@ function callGeminiInteractionsAPI(inputContent) {
     }
   }
 
-  return { text: lastErrorDetail + "\n請稍後再試，或聯絡開發人員。", model: "" };
+  return { text: lastErrorDetail + "\n請稍後再試，或聯絡開發人員。", model: "", sources: [] };
+}
+
+/**
+ * 從 Gemini Google Search Grounding 回應中萃取參考來源連結
+ * @param {Object} json - Gemini generateContent 回應 JSON
+ * @return {Array<{title: string, url: string}>}
+ */
+function extractGroundingSources(json) {
+  const sources = [];
+  try {
+    const metadata = json && json.candidates && json.candidates[0] && json.candidates[0].groundingMetadata;
+    const chunks = metadata && metadata.groundingChunks;
+    if (Array.isArray(chunks)) {
+      for (const chunk of chunks) {
+        const web = chunk && chunk.web;
+        if (web && web.uri && !sources.some(s => s.url === web.uri)) {
+          sources.push({
+            title: (web.title || 'Google 搜尋來源').trim(),
+            url: web.uri.trim()
+          });
+        }
+        if (sources.length >= 2) break;
+      }
+    }
+  } catch (e) {
+    console.warn('解析 Grounding 來源略過:', e);
+  }
+  return sources;
 }
 
 /**
@@ -1191,7 +1360,12 @@ function sanitizeForLine(text) {
  * 回覆訊息給 LINE
  */
 function replyToLine(replyToken, text) {
-  const sanitizedText = sanitizeForLine(text);
+  let sanitizedText = sanitizeForLine(text);
+  // LINE Messaging API 單則文字訊息上限為 5,000 字元，保留安全緩衝避免發送失敗
+  const MAX_LINE_TEXT_LEN = 4900;
+  if (sanitizedText.length > MAX_LINE_TEXT_LEN) {
+    sanitizedText = sanitizedText.substring(0, MAX_LINE_TEXT_LEN) + '\n…（內容過長已截斷）';
+  }
   const url = 'https://api.line.me/v2/bot/message/reply';
   const payload = {
     "replyToken": replyToken,
@@ -1246,8 +1420,8 @@ function dispatchSpecializedData(text) {
     }
   }
 
-  // 3. 民生油價與水電類 (油價、汽油、柴油、92、95、98、加油、油價漲跌)
-  if (/油價|汽油|柴油|92|95|98|加油|油價漲跌/i.test(text)) {
+  // 3. 民生油價與水電類 (收緊條件，避免「Windows 98」「幫我加油」「95年」誤觸中油油價)
+  if (/油價|汽油|柴油|無鉛|中油|加油站|(?:92|95|98)\s*(?:無鉛|汽油|油價)/i.test(text)) {
     const fuelData = fetchFuelPriceData();
     if (fuelData) {
       contextReport += `【台灣中油官方最新牌價資訊】\n${fuelData}\n\n`;
@@ -1300,9 +1474,9 @@ function analyzeHighwayRoute(text) {
     '台北-台南': 300, '台南-台北': 300
   };
 
-  let origin = '台南市區';
-  let dest = '新竹市區';
-  let distanceKm = 220;
+  let origin = '';
+  let dest = '';
+  let distanceKm = 0;
 
   const match = text.match(/(從|由)?(基隆|台北|新北|桃園|新竹|苗栗|台中|彰化|雲林|嘉義|台南|高雄|屏東)(市|區|縣)?(到|至|前往)(基隆|台北|新北|桃園|新竹|苗栗|台中|彰化|雲林|嘉義|台南|高雄|屏東)/);
   if (match) {
@@ -1321,9 +1495,13 @@ function analyzeHighwayRoute(text) {
     }
   }
 
-  let defaultFreeway = '國道一號';
-  if (/國3|國三|國道3|國道三/i.test(text)) {
+  let defaultFreeway = '國道';
+  if (/國1|國一|國道1|國道一/i.test(text)) {
+    defaultFreeway = '國道一號';
+  } else if (/國3|國三|國道3|國道三/i.test(text)) {
     defaultFreeway = '國道三號';
+  } else if (/國5|國五|國道5|國道五/i.test(text)) {
+    defaultFreeway = '國道五號';
   }
 
   return { origin, dest, distanceKm, defaultFreeway };
@@ -1335,11 +1513,13 @@ function analyzeHighwayRoute(text) {
 function fetchHighwayTrafficData(text) {
   const cache = CacheService.getScriptCache();
   const route = analyzeHighwayRoute(text);
-  const cacheKey = `TRAFFIC_${encodeURIComponent(route.origin)}_${encodeURIComponent(route.dest)}`;
+  const cacheKey = `TRAFFIC_${encodeURIComponent(route.origin || 'ALL')}_${encodeURIComponent(route.dest || route.defaultFreeway)}`;
   const cachedData = cache.get(cacheKey);
   if (cachedData) return cachedData;
 
-  let report = `▫️ 路線資訊：從 ${route.origin} 開車前往 ${route.dest}，主要行駛 ${route.defaultFreeway}（總里程約 ${route.distanceKm} 公里）\n`;
+  let report = route.origin && route.dest
+    ? `▫️ 路線資訊：從 ${route.origin} 開車前往 ${route.dest}，主要行駛 ${route.defaultFreeway}${route.distanceKm ? `（總里程約 ${route.distanceKm} 公里）` : ''}\n`
+    : `▫️ 查詢範圍：${route.defaultFreeway}即時路況\n`;
   let hasLiveSpeeds = false;
 
   // A. 若有 TDX 金鑰，優先透過 TDX 取得國道即時車速 (Section) 與即時事件 (Event)
@@ -1388,7 +1568,7 @@ function fetchHighwayTrafficData(text) {
   }
 
   // B. 免 Key 模式：若無 TDX 或未取得車速，定向利用 DuckDuckGo 檢索 1968services.tw 即時塞車路段與時速
-  if (!hasLiveSpeeds) {
+  if (!hasLiveSpeeds && ENABLE_DUCKDUCKGO) {
     try {
       const query = `site:1968services.tw 國道 即時路況 時速 塞車 ${route.origin} ${route.dest}`;
       const searchRes = searchDuckDuckGo(query);
@@ -1475,7 +1655,9 @@ function fetchWeatherData(text) {
     '連江': '連江縣', '馬祖': '連江縣'
   };
 
-  let matchedCityKey = Object.keys(cityMap).find(c => text.includes(c)) || "台北";
+  // 僅在明確提及台灣 22 縣市時才查 CWA/TDX，避免問國外天氣（如東京、倫敦）誤塞臺北市預報干擾 Gemini
+  const matchedCityKey = Object.keys(cityMap).find(c => text.includes(c));
+  if (!matchedCityKey) return "";
   const cwaCity = cityMap[matchedCityKey];
 
   // 嘗試讀取快取 (快取 20 分鐘 = 1200 秒)
@@ -1772,8 +1954,8 @@ function extractParkingLocation(text) {
     '澎湖': 'PenghuCounty'
   };
 
-  let cityEn = 'Hsinchu';
-  let cityZh = '新竹';
+  let cityEn = '';
+  let cityZh = '';
   for (const [zh, en] of Object.entries(cityMap)) {
     if (text.includes(zh)) {
       cityEn = en;
@@ -1781,6 +1963,8 @@ function extractParkingLocation(text) {
       break;
     }
   }
+  // 未提及台灣縣市時回傳 null，避免誤塞預設縣市干擾 Gemini 查詢
+  if (!cityEn) return null;
 
   // 精準清理多餘語氣詞，萃取出最核心的地標（如「新竹巨城」、「台北車站」）
   let landmark = text.replace(/^(請幫我|幫我|請|麻煩|我想|可以幫我|替我|請問|查一下|查詢|搜尋)\s*/g, '')
@@ -1801,6 +1985,7 @@ function extractParkingLocation(text) {
  */
 function fetchParkingData(text) {
   const loc = extractParkingLocation(text);
+  if (!loc) return "";
   const cache = CacheService.getScriptCache();
   const cacheKey = `PARK_${encodeURIComponent(loc.cityEn)}_${encodeURIComponent(loc.landmark)}`;
   const cachedData = cache.get(cacheKey);
@@ -1865,7 +2050,7 @@ function fetchParkingData(text) {
   }
 
   // B. 免 Key 定向搜尋備援 (當未設定 TDX 或 TDX 抓不到特定民營商圈停車場時)
-  if (!hasData) {
+  if (!hasData && ENABLE_DUCKDUCKGO) {
     try {
       const query = `停車場 即時車位 剩餘車位 費率 ${loc.cityZh} ${loc.landmark}`;
       const searchRes = searchDuckDuckGo(query);

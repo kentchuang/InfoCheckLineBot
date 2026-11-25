@@ -369,8 +369,8 @@ function renderHelpPageHtml() {
       </div>
       <p class="desc">為避免洗版打擾日常對話，機器人在群組與私訊中採用不同的喚醒機制：</p>
       <ul class="rules-list">
-        <li><strong>群組對話 (防洗版原則)</strong>：平時保持完全靜默。必須主動輸入 <code>@AI</code>、<code>@bot</code> 或標記機器人，它才會響應問答。</li>
-        <li><strong>被動安全守護</strong>：在群組中即使沒有標記機器人，只要內容包含「真的假的、假訊息、造謠、詐騙、安全嗎」等關鍵字，機器人會主動啟動鑑識協助把關。</li>
+        <li><strong>群組對話 (防洗版原則)</strong>：平時保持完全靜默。必須主動輸入 <code>@AI</code>、<code>@bot</code> 或 LINE 原生標記機器人，它才會響應問答。</li>
+        <li><strong>圖片多模態查核</strong>：對群組中先前傳送的任何一張圖片按「回覆」並輸入 <code>@AI 這張圖是真的嗎？</code>，或剛傳完圖直接 <code>@AI 幫我看這張圖</code>，即可看圖＋聯網查證。</li>
         <li><strong>一對一私訊</strong>：已獲白名單授權的成員可直接私訊提問，無需加上 <code>@AI</code>。</li>
       </ul>
       <div class="callout callout-info">
@@ -385,7 +385,7 @@ function renderHelpPageHtml() {
         <h2 class="card-title">1. 即時聯網問答（生活、時事、多日天氣）</h2>
         <span class="card-tag tag-blue">自動附出處</span>
       </div>
-      <p class="desc">機器人能即時透過 DuckDuckGo 權威多方搜尋，獲取最新新聞、生活資訊、節慶日期或完整今明 36 小時天氣預報，並於文末自動附上核實連結。</p>
+      <p class="desc">機器人透過 Gemini 原生 Google Search Grounding 即時聯網查詢最新新聞、生活資訊、國外／台灣天氣預報，並於文末自動附上參考連結。</p>
       
       <div class="example-block">
         <span class="example-text">@AI 明天台南天氣如何？會下雨嗎？</span>
@@ -570,7 +570,7 @@ function renderHelpPageHtml() {
       <details>
         <summary>Q3: 查核的資料來源從哪裡來？</summary>
         <div class="faq-answer">
-          機器人全面採用「免綁卡、零成本」的公開權威來源，包括 Cofacts 真的假的、台灣事實查核中心、MyGoPen，並配合 DuckDuckGo 權威排序二段式爬蟲與 Gemini 官方模型梯隊進行深度分析。
+          機器人結合 Gemini 原生 Google Search 聯網查證（自動附上搜尋來源連結）、Cofacts 真的假的闢謠庫，以及台灣官方開放資料 API（TDX、中央氣象署、中油、健保署、財政部），並搭配官方 Stable 模型梯隊進行查核。
         </div>
       </details>
 

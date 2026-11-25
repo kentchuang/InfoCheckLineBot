@@ -23,7 +23,8 @@
 | 觸發方式 | 常用格式 / 範例 | 行為與功能 |
 | :--- | :--- | :--- |
 | **🤖 @AI / @bot 核心喚醒** | `@AI`, `@ai`, `@Ai`, `@Bot`, `@bot` 任一開頭 或 LINE 原生 @提及 | **群組唯一觸發入口**：避免任何日常分享或聊天誤觸。<br>*(精準過濾：日常輸入 Email 如 `abc@gmail.com` 絕不誤觸)* |
-| **⚖️ 資訊查核闢謠** | `@AI [文字內容] 真的假的？`、`@AI 查核 [文字]` | 進行真偽鑑定、AI 參與度分析、Cofacts 比對與資料來源核實出處。 |
+| **⚖️ 資訊查核闢謠** | `@AI [文字內容] 真的假的？`、`@AI 查核 [文字]` | 進行真偽鑑定、Cofacts 比對、Gemini Google Search 聯網查證與來源出處。 |
+| **🖼️ 圖片多模態查核** | 對群組圖片按「回覆」並 `@AI 這張圖是真的嗎？`<br>或傳圖後 `@AI 幫我看這張圖寫什麼` | 靜默暫存近期圖片 ID（30 分鐘），或依 LINE 原生 `quotedMessageId` 下載圖片，由 Gemini 多模態看圖＋聯網查證。 |
 | **🔍 詐騙網址偵測** | `@AI [網址] 安全嗎？`、`@AI 這網站有詐騙嗎 [網址]` | 靜態風險評分結合即時網頁抓取與 AI 深度鑑識，判定是否為釣魚連結。 |
 | **🎬 影片精華整理** | `@AI 整理大綱 https://youtu.be/...` | 抓取 YouTube oEmbed 資訊並生成核心精華大綱。 |
 | **🚗 國道路況與車速** | `@bot 國道路況`, `即時路況`, `台南到新竹車速` | 呼叫 TDX 國道路段平均車速與突發事故，推算動態行車時間（ETA）。 |
@@ -53,23 +54,22 @@
 
 ### 🛡️ 多模型自動降級備援機制 (Auto-Fallback)
 
-為應對大型模型在高負載時可能出現的 503 或 429 錯誤，系統建立了一套 Google 官方最新、新用戶 100% 支援的四階多層防護網，按效能與延遲順序自動切換模型：
+為應對高負載時可能出現的 503 或 429 錯誤，系統全面採用 Google 官方最新 **Stable 正式版** 四階防護網（皆原生支援 Google Search Grounding 與圖片多模態，已移除棄用之 `gemini-2.5-flash` 與舊版 preview）：
 
-1. **Gemini 3 Flash Preview (`gemini-3-flash-preview`)** (Tier 1 主力首選：2026 全新 3 系列架構，推論、多模態與鑑識能力最強，新帳號原生支援)
-2. **Gemini 3.1 Flash-Lite-Preview (`gemini-3.1-flash-lite-preview`)** (Tier 2 極速防線：極低延遲、高頻率配額，確保 LINE Webhook 絕不逾時)
-3. **Gemini 2.5 Flash (`gemini-2.5-flash`)** (Tier 3 穩定備援：官方經典穩定 Flash 版)
-4. **Gemini 3.1 Pro Preview (`gemini-3.1-pro-preview`)** (Tier 4 旗艦備援：**Google 官方指定取代 2.5-pro 之最新深度旗艦**，專責高難度複雜鑑識)
+1. **Gemini 3.8 Flash (`gemini-3.8-flash`)** (Tier 1 主力首選：兼顧速度與事實查核推理品質，工具呼叫穩定)
+2. **Gemini 3.5 Flash-Lite (`gemini-3.5-flash-lite`)** (Tier 2 極速防線：超低延遲與高性價比，確保 LINE Webhook 絕不逾時)
+3. **Gemini 4 Hydrogen (`gemini-4-hydrogen`)** (Tier 3 世代備援：Gemini 4 快速主力正式版，大幅降低幻覺 >5x，高可靠度跨世代備援)
+4. **Gemini 3.1 Flash-Lite (`gemini-3.1-flash-lite`)** (Tier 4 經濟保底：低成本高配額最終保底防線)
 
 
-### 🌐 免帳號、免綁卡之深度事實查核 (Deep Web Fact-Checking)
+### 🌐 聯網查證與圖片多模態管線 (`Code_Interactions.gs`)
 
-系統已內建免申請帳號、免綁信用卡的完整查核管線：
+`Code_Interactions.gs` 採用 **Gemini 原生 Google Search Grounding** 與 **Cofacts 闢謠庫** 雙軌查證，並支援群組圖片多模態判讀：
 
-1. **Cofacts（真的假的）闢謠庫直連**：以 GraphQL 即時查詢台灣開源查核資料庫，命中時直接取得查核員之闢謠依據與反駁出處。
-2. **DuckDuckGo 多方來源擴展檢索**：自動取得 8 筆即時搜尋結果，並對事實查核中心 (`tfc-taiwan.org.tw`)、MyGoPen (`mygopen.com`)、政府機關 (`.gov.tw`) 等權威網域進行加權排序。
-3. **二段式深度內文爬取 (Deep Crawl)**：自動點入權威性最高的來源網頁，抓取前 1,500 字乾淨正文，讓 AI 不僅看摘要，更能比對完整脈絡。
-
-> 💡 **全免成本**：完全不需使用付費的 Google Search Grounding，保持 `ENABLE_GROUNDING = false` 即可享有完整即時查核能力！
+1. **Google Search Grounding (`ENABLE_GROUNDING = true`)**：透過 `tools: [{ "google_search": {} }]` 由 Gemini 自主即時上網查證，並自動萃取 `groundingMetadata.groundingChunks` 附在回覆尾端作為「🔗 求證連結」。
+2. **DuckDuckGo 爬取開關 (`ENABLE_DUCKDUCKGO = false`)**：付費 API Key 模式預設關閉 DuckDuckGo 爬取以降低延遲與失敗率；若有免綁卡需求可手動改回 `true`。
+3. **Cofacts（真的假的）闢謠庫直連**：於明確查核／謠言／新聞提問時以 GraphQL 查詢台灣開源闢謠庫，一般生活提問不觸發以維持低延遲。
+4. **群組／私訊圖片多模態查核**：收到圖片時靜默暫存 `message.id`（30 分鐘）；使用者對任一張圖片按「回覆」並 `@AI`，或於提問中指向最近圖片時，透過 LINE Content API 取得圖片並送交 Gemini 同步看圖與上網查證。
 
 ### 🔍 詐騙網址偵測：白名單放行 + 靜態特徵 + 網頁鑑識 + AI 四層防護
 
@@ -158,8 +158,9 @@
 | 參數 | 設定值 | 為什麼要這樣設定？ |
 | :--- | :--- | :--- |
 | **Temperature** | `0.3` | **確保穩定性**：設定較低的值可降低 AI 隨機發揮的機率，確保對於同一個連結，AI 每次都能產出嚴謹、一致且基於事實的查證結果。 |
-| **Max Output Tokens** | `2000` | **保留思考空間**：最新的 Gemini 2.x 模型具備「深度思考」機制。調高上限並非為了輸出長篇大論（我們會用指令控在 250 字內），而是**確保 AI 的背景推導過程不會因為額度不足而被強制截斷**導致當機。 |
-| **Google Search** | `ENABLE_GROUNDING` 旗標控制 | **Free Tier（false）**：完全不使用，$0 元。**付費模式（true）**：動態觸發，超出免費配額後 $14/1000 次。 |
+| **Max Output Tokens** | `4096`（開啟 Grounding） / `1024`（關閉） | **保留 Thinking 緩衝**：Gemini 3.8 / 4 系列之思考 token 計入輸出上限，調高至 `4096` 可防止思考耗盡額度導致結論被截斷，同時於 LINE 發送端加上 4,900 字元安全防呆。 |
+| **Google Search** | `ENABLE_GROUNDING = true`（預設） | **付費模式（true）**：使用 `google_search: {}`，Gemini 3 及更新世代每月共用 5,000 次免費搜尋，超額後 $14/1000 次。**免費模式（false）**：完全不使用。 |
+| **DuckDuckGo** | `ENABLE_DUCKDUCKGO = false`（預設） | 開啟 Google Search Grounding 後預設關閉，避免無謂網頁爬取與延遲；免綁卡情境可切回 `true`。 |
 
 ---
 
@@ -167,10 +168,8 @@
 
 | 模式 | 旗標設定 | Google Search | 模型費用 | GAS 環境 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Free Tier（推薦）** | `ENABLE_GROUNDING = false` | $0（不使用） | 在免費配額內完全 $0 | 免費 |
-| **Grounding 付費模式** | `ENABLE_GROUNDING = true` | 超額後 $14/1000 次 | Token 費用極低 | 免費 |
-
-> 💡 **建議**：日常輕度使用請維持 `false`（Free Tier）。若遇到需要核對最新新聞、時事的影片，可手動改為 `true` 重新部署，用後再改回 `false`。
+| **Grounding 付費模式（目前預設）** | `ENABLE_GROUNDING = true`、`ENABLE_DUCKDUCKGO = false` | 每月 5,000 次免費，超額後 $14/1000 次 | 依實際 Token 計費（3.8 Flash / 3.5 Flash-Lite 成本低廉） | 免費 |
+| **Free Tier 免綁卡模式** | `ENABLE_GROUNDING = false`、`ENABLE_DUCKDUCKGO = true` | $0（改用 DuckDuckGo 爬取） | 在免費配額內 $0 | 免費 |
 
 ## 7. 雙版本核心架構對比：Code.gs vs Code_Interactions.gs
 
@@ -180,7 +179,7 @@
 | :--- | :--- | :--- |
 | **產品定位** | **專職事實查核與防詐衛士** | **全功能智慧生活 + 事實查核 AI 助手** |
 | **底層 API 規格** | Google Gemini `generateContent` API | Google Gemini 官方新世代 `Interactions API` (/v1beta/interactions) 統一通訊 |
-| **模型調度順序** | `gemini-3-flash-preview` ➔ `3.1-flash-lite` ➔ `2.5-flash` ➔ `3.1-pro-preview` | `gemini-3-flash-preview` ➔ `3.1-flash-lite` ➔ `2.5-flash` ➔ `3.1-pro-preview` |
+| **模型調度順序** | `gemini-3-flash-preview` ➔ `3.1-flash-lite` ➔ `2.5-flash` ➔ `3.1-pro-preview` | `gemini-3.8-flash` ➔ `gemini-3.5-flash-lite` ➔ `gemini-4-hydrogen` ➔ `gemini-3.1-flash-lite`（全 Stable 正式版） |
 | **回覆輸出排版** | 🟢 **極簡直球**：[燈號/圖示] + 最終結論（1~3句） | 🟢 **極簡直球**：[燈號/圖示] + 最終結論（1~3句） |
 | **回應模型標籤** | 🟢 訊息末尾固定附帶 `🤖 模型：<model>` | 🟢 訊息末尾固定附帶 `🤖 模型：<model>` |
 | **群組喚醒機制** | 純關鍵字精確比對觸發 (查核、整理、詐騙) | **主動 @TAG 喚醒 (@AI/@bot) + 被動關鍵字守護**<br>*(未提及且無關鍵字時，分享網址保持完全靜默)* |
@@ -227,6 +226,19 @@
 ---
 
 ## 9. 版本更新記錄
+
+- **v2026.11.26.01-grounding-stable-models-and-image-qa**:
+  - 🌐 **啟用 Gemini 原生 Google Search Grounding 並關閉 DuckDuckGo**：
+    * `ENABLE_GROUNDING = true`、`ENABLE_DUCKDUCKGO = false`，將工具語法由舊版 `google_search_retrieval` 升級為 `google_search: {}`，並自動萃取 `groundingMetadata.groundingChunks` 附於回覆尾端「🔗 求證連結」。
+    * 備註當前使用之付費 `GEMINI_API_KEY` 別名 `antigravityextra`。
+  - 🚀 **全面升級官方 Stable 模型備援梯隊**：
+    * 移除已棄用的 `gemini-2.5-flash` 與舊版 preview，升級為 `gemini-3.8-flash` ➔ `gemini-3.5-flash-lite` ➔ `gemini-4-hydrogen` ➔ `gemini-3.1-flash-lite`。
+    * `maxOutputTokens` 調整為 `4096`（預留 Thinking Token 空間），並於 `replyToLine` 加入 LINE 4,900 字元安全截斷防呆。
+  - 🖼️ **新增群組／私訊圖片多模態判讀與查證**：
+    * 收到圖片時靜默快取 `message.id`（30 分鐘）；支援「原生回覆圖片 + `@AI`（`quotedMessageId`）」與「傳圖後直接 `@AI` 追問」，自動透過 LINE Content API 轉 Base64 送交 Gemini 同步看圖＋聯網查證。
+  - 🎯 **TAG 清理與台灣專屬 API 防誤觸強化**：
+    * 新增 `stripBotMention`，依 LINE `mentionees` 精準切除機器人標籤，不再誤刪 Email、`@decorator` 或 `@帳號`。
+    * 收緊油價、天氣、停車、國道路況與 Cofacts 觸發條件，避免問國外天氣或一般提問時被灌入錯置預設資料。
 
 - **v2026.09.29.01-minimalist-format-and-whitelist-fix**:
   - ⚡ **BOT 回覆極簡革命（燈號 + 最終結論）**：
