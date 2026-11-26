@@ -341,9 +341,11 @@ function processMessage(event) {
     }
     if (emergencyDdgResults && emergencyDdgResults.length > 0) {
       let ddgMsg = "⚠️ AI 模型暫時繁忙，以下為即時網路搜尋結果（DuckDuckGo 緊急備援）：";
-      emergencyDdgResults.slice(0, 3).forEach((item, idx) => {
+      const topDdg = emergencyDdgResults.slice(0, 3);
+      const shortDdgUrls = shortenUrlsBatch(topDdg.map(item => item.url));
+      topDdg.forEach((item, idx) => {
         const snippetLine = item.snippet ? `\n${item.snippet.substring(0, 120)}` : '';
-        ddgMsg += `\n\n${idx + 1}. ${item.title}${snippetLine}\n🔗 ${item.url}`;
+        ddgMsg += `\n\n${idx + 1}. ${item.title}${snippetLine}\n🔗 ${shortDdgUrls[idx]}`;
       });
       replyToLine(replyToken, ddgMsg);
       return;
@@ -1156,38 +1158,210 @@ function getDeepFactCheckContext(factQuery) {
 }
 
 /**
+ * 產生短且安全的 URL 快取鍵 (雙重 FNV-1a 32-bit 雜湊，避免超出 CacheService Key 長度上限)
+ * @param {string} prefix
+ * @param {string} url
+ * @return {string}
+ */
+function buildUrlCacheKey(prefix, url) {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  const s = String(url || '');
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= (c + i);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `${prefix}_${(h1 >>> 0).toString(16)}_${(h2 >>> 0).toString(16)}`;
+}
+
+/**
+ * 平行還原 Gemini Grounding 轉址連結 (vertexaisearch.cloud.google.com/grounding-api-redirect/...)
+ * 取得真實永久落地網址（只讀 302 Location，不下載網頁內文，含 6 小時快取）
+ * @param {string[]} urls
+ * @return {string[]}
+ */
+function resolveGroundingRedirectUrls(urls) {
+  if (!Array.isArray(urls) || urls.length === 0) return [];
+  const cache = CacheService.getScriptCache();
+  const results = urls.slice();
+  const pendingIndices = [];
+  const requests = [];
+
+  for (let i = 0; i < urls.length; i++) {
+    const u = (urls[i] || '').trim();
+    if (!/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\//i.test(u)) continue;
+
+    const cacheKey = buildUrlCacheKey('URL_RES', u);
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      results[i] = cached;
+      continue;
+    }
+
+    pendingIndices.push(i);
+    requests.push({
+      url: u,
+      method: 'get',
+      followRedirects: false,
+      muteHttpExceptions: true
+    });
+  }
+
+  if (requests.length > 0) {
+    try {
+      const responses = UrlFetchApp.fetchAll(requests);
+      for (let j = 0; j < responses.length; j++) {
+        const idx = pendingIndices[j];
+        const res = responses[j];
+        const code = res.getResponseCode();
+        if ([301, 302, 303, 307, 308].includes(code)) {
+          const headers = res.getAllHeaders() || {};
+          const loc = headers['Location'] || headers['location'];
+          if (loc && /^https?:\/\//i.test(loc)) {
+            results[idx] = loc.trim();
+            cache.put(buildUrlCacheKey('URL_RES', urls[idx]), results[idx], 21600);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('還原 Grounding 轉址連結略過:', e);
+    }
+  }
+
+  return results;
+}
+
+/**
+ * 批次平行縮短過長網址 (TinyURL 為主、is.gd 為備援，含 6 小時快取，失敗時優雅保留原網址)
+ * 長度 <= 45 字元之乾淨網址直接保留，兼顧簡短版面與來源透明度
+ * @param {string[]} urls
+ * @return {string[]}
+ */
+function shortenUrlsBatch(urls) {
+  if (!Array.isArray(urls) || urls.length === 0) return [];
+  const SHORTEN_THRESHOLD = 45;
+  const cache = CacheService.getScriptCache();
+  const results = urls.slice();
+  const pendingIndices = [];
+  const requests = [];
+
+  for (let i = 0; i < urls.length; i++) {
+    const u = (urls[i] || '').trim();
+    if (!u || !/^https?:\/\//i.test(u) || u.length <= SHORTEN_THRESHOLD) continue;
+
+    const cacheKey = buildUrlCacheKey('URL_SHORT', u);
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      results[i] = cached;
+      continue;
+    }
+
+    pendingIndices.push(i);
+    requests.push({
+      url: `https://tinyurl.com/api-create.php?url=${encodeURIComponent(u)}`,
+      method: 'get',
+      muteHttpExceptions: true
+    });
+  }
+
+  if (requests.length > 0) {
+    const fallbackIndices = [];
+    try {
+      const responses = UrlFetchApp.fetchAll(requests);
+      for (let j = 0; j < responses.length; j++) {
+        const idx = pendingIndices[j];
+        const res = responses[j];
+        const shortText = res.getResponseCode() === 200 ? (res.getContentText() || '').trim() : '';
+        if (/^https?:\/\/\S+$/i.test(shortText) && shortText.length < results[idx].length) {
+          results[idx] = shortText;
+          cache.put(buildUrlCacheKey('URL_SHORT', urls[idx]), shortText, 21600);
+        } else {
+          fallbackIndices.push(idx);
+        }
+      }
+    } catch (e) {
+      console.warn('TinyURL 批次縮網址異常，改用 is.gd 備援:', e);
+      pendingIndices.forEach(idx => fallbackIndices.push(idx));
+    }
+
+    // 備援：TinyURL 失敗之項目改用 is.gd
+    if (fallbackIndices.length > 0) {
+      try {
+        const fbRequests = fallbackIndices.map(idx => ({
+          url: `https://is.gd/create.php?format=simple&url=${encodeURIComponent(results[idx])}`,
+          method: 'get',
+          muteHttpExceptions: true
+        }));
+        const fbResponses = UrlFetchApp.fetchAll(fbRequests);
+        for (let k = 0; k < fbResponses.length; k++) {
+          const idx = fallbackIndices[k];
+          const res = fbResponses[k];
+          const shortText = res.getResponseCode() === 200 ? (res.getContentText() || '').trim() : '';
+          if (/^https?:\/\/\S+$/i.test(shortText) && shortText.length < results[idx].length) {
+            results[idx] = shortText;
+            cache.put(buildUrlCacheKey('URL_SHORT', urls[idx]), shortText, 21600);
+          }
+        }
+      } catch (e2) {
+        console.warn('is.gd 備援縮網址略過:', e2);
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
  * 格式化供使用者親自核實之資料來源註腳 (精簡版)
- * 自動過濾 API 開發者平臺、首頁根網址與無效連結，僅保留具體查證文章
+ * 自動還原 Google Grounding 轉址、過濾 API 門戶與首頁根網址，並將過長網址自動縮短
  * @param {Array<Object>} sources - 來源清單 [{title, url}]
  * @return {string} 格式化後的文字區塊
  */
 function formatCitationFootnote(sources) {
   if (!sources || !Array.isArray(sources) || sources.length === 0) return "";
 
-  // 過濾無效、純 API 門戶或純根目錄首頁連結
-  const validSources = sources.filter(src => {
-    if (!src || !src.url) return false;
-    const url = src.url.trim();
-
+  const isValidSourceUrl = (url) => {
+    if (!url) return false;
+    const u = url.trim();
     // 排除特定 API 開發者平臺與無查證內容之門戶
-    if (/tdx\.transportdata\.tw|freeway\.gov\.tw|data\.gov\.tw|developer\.|api\./i.test(url)) {
+    if (/tdx\.transportdata\.tw|freeway\.gov\.tw|data\.gov\.tw|developer\.|api\./i.test(u)) {
       return false;
     }
-
-    // 排除純根網域首頁 (例如 https://example.com 或 https://example.com/)，使用者點進去無法直接檢視查證內容
-    const cleaned = url.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    // 排除純根網域首頁 (例如 https://example.com 或 https://example.com/)
+    const cleaned = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
     if (!cleaned.includes("/")) {
       return false;
     }
-
     return true;
-  });
+  };
+
+  // 先做初步過濾並取最多 3 筆候選，再平行還原 Google Grounding 轉址為真實永久網址
+  const candidates = sources
+    .filter(src => src && src.url && isValidSourceUrl(src.url))
+    .slice(0, 3);
+  if (candidates.length === 0) return "";
+
+  const resolvedUrls = resolveGroundingRedirectUrls(candidates.map(s => s.url.trim()));
+  const validSources = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const finalUrl = resolvedUrls[i];
+    if (isValidSourceUrl(finalUrl) && !validSources.some(s => s.url === finalUrl)) {
+      validSources.push({ title: candidates[i].title, url: finalUrl });
+    }
+    if (validSources.length >= 2) break;
+  }
 
   if (validSources.length === 0) return "";
 
+  // 將超過 45 字元之長網址平行縮短，避免 LINE 對話洗版
+  const displayUrls = shortenUrlsBatch(validSources.map(s => s.url));
+
   let footnote = "\n\n🔗 求證連結：";
-  validSources.slice(0, 2).forEach(src => {
-    footnote += `\n▫️ ${src.title}：${src.url}`;
+  validSources.forEach((src, idx) => {
+    footnote += `\n▫️ ${src.title}：${displayUrls[idx]}`;
   });
   return footnote;
 }
@@ -1477,7 +1651,7 @@ function extractGroundingSources(json) {
             url: web.uri.trim()
           });
         }
-        if (sources.length >= 2) break;
+        if (sources.length >= 3) break;
       }
     }
   } catch (e) {
