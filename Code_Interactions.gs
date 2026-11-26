@@ -293,20 +293,36 @@ function processMessage(event) {
     }
   }
 
+  // 5-D. 三段式 Web Search 分流判定（force 強制查證 / skip 靜態免搜尋 / auto 交由模型自主決定）
+  const searchDecision = decideWebSearchMode(cleanUserText, {
+    hasSpecializedHit: hasSpecializedHit,
+    hasUrl: Boolean(urlMatch),
+    hasImage: Boolean(attachedImage)
+  });
+
   if (attachedImage) {
-    enrichedPrompt += `\n【附加圖片資訊】使用者已附上圖片，請直接判讀圖片中的文字、截圖、連結或畫面內容，並結合 Google Search 回答或查證使用者問題。\n`;
+    const imgSearchHint = (ENABLE_GROUNDING && searchDecision.enableGrounding)
+      ? '，並視需要結合 Google Search 回答或查證使用者問題'
+      : '，直接依據圖片內容回答使用者問題';
+    enrichedPrompt += `\n【附加圖片資訊】使用者已附上圖片，請直接判讀圖片中的文字、截圖、連結或畫面內容${imgSearchHint}。\n`;
   } else if (isAskingAboutImage) {
     enrichedPrompt += `\n【系統提示】使用者正在詢問圖片內容，但目前未能取得圖片（可能已超過暫存/LINE 保存期限，或近期未傳送圖片）。請簡短禮貌地請使用者對該圖片按「回覆」並 @AI，或重新傳送一次圖片。\n`;
   }
 
+  if (ENABLE_GROUNDING && searchDecision.mode === 'force') {
+    enrichedPrompt += `\n【查證指示】此題涉及即時資訊或事實查核，請優先使用 Google Search 查證最新公開來源。\n`;
+  }
+
   // 6. 呼叫 Interactions API（由 AI 自行判斷意圖，輸出極簡「燈號 + 最終結論」，支援圖片多模態）
-  let aiResponse = callGeminiInteractionsAPI(enrichedPrompt, attachedImage);
+  let aiResponse = callGeminiInteractionsAPI(enrichedPrompt, attachedImage, {
+    disableGrounding: !searchDecision.enableGrounding
+  });
   let usedDdgFallback = false;
   let emergencyDdgResults = null;
 
-  // 6-A. 緊急底線 1（Grounding 失敗降級）：當開啟 Grounding 但呼叫失敗時，自動拔掉 google_search 工具，
-  //      強制啟用 DuckDuckGo 抓取摘要並改由純 Gemini 模型回答（平時成功不觸發，零額外延遲）
-  if ((!aiResponse || !aiResponse.ok) && ENABLE_GROUNDING) {
+  // 6-A. 緊急底線 1（Grounding 失敗降級）：當本次有開啟 Grounding 但呼叫失敗時，自動拔掉 google_search 工具，
+  //      強制啟用 DuckDuckGo 抓取摘要並改由純 Gemini 模型回答（平時成功或未開 Grounding 時不觸發）
+  if ((!aiResponse || !aiResponse.ok) && ENABLE_GROUNDING && searchDecision.enableGrounding) {
     const fallbackQuery = extractSearchQuery(cleanUserText);
     let fallbackPrompt = enrichedPrompt;
     if (fallbackQuery) {
@@ -404,6 +420,71 @@ function stripBotMention(text, mention) {
     .trim();
 
   return cleaned;
+}
+
+/**
+ * 三段式 Web Search 分流判定（0 延遲、0 額外 Token 成本）
+ * - skip：台灣官方 API 已命中完整數據、純翻譯/潤稿/OCR、純計算/單位換算、程式語法、簡短閒聊 ➔ 關閉 Grounding
+ * - force：時效詞、查核/防詐、變動生活資訊、政策/法規/醫療、外部網址 ➔ 強制開啟並提示優先查證
+ * - auto：灰色地帶（冷門知識、字音字義等）➔ 預設開啟 Grounding 交由 Gemini 依信心度自主決定
+ * @param {string} cleanText - 清理後的使用者提問
+ * @param {Object} [opts] - { hasSpecializedHit?: boolean, hasUrl?: boolean, hasImage?: boolean }
+ * @return {{ mode: 'skip'|'force'|'auto', enableGrounding: boolean, reason: string }}
+ */
+function decideWebSearchMode(cleanText, opts) {
+  const text = String(cleanText || '').trim();
+  const options = opts || {};
+
+  if (!ENABLE_GROUNDING) {
+    return { mode: 'skip', enableGrounding: false, reason: 'grounding_disabled' };
+  }
+
+  const factCheckRegex = /真的嗎|真的假的|真假|假的|謠言|闢謠|詐騙|騙人|求證|查證|聽說|網傳|轉傳|官網|官方|可信嗎|安全嗎/i;
+
+  // 1. 已由台灣官方專屬 API（中油油價、財政部發票、健保署急診、CWA 氣象等）直接取得權威資料，且非查核闢謠情境 ➔ 省去重複搜尋
+  if (options.hasSpecializedHit && !factCheckRegex.test(text)) {
+    return { mode: 'skip', enableGrounding: false, reason: 'specialized_api_hit' };
+  }
+
+  // 2. 強制開啟 (force)：含外部網址、時效詞、查核/防詐、變動資訊、政策/法規/醫療
+  const timeSensitiveRegex = /今天|今日|昨天|明天|最近|最新|現在|目前|今年|去年|明年|202[5-9]|本週|這週|本月|剛才|剛剛|停班|停課|上市|開賣|開幕|公休|還開著|幾點開/i;
+  const volatileInfoRegex = /多少錢|價格|票價|售價|營業時間|菜單|口味|優惠|折扣|股價|匯率|時刻表|班次|比分|賽程|排名|得獎|中獎|新聞|時事/i;
+  const policyMedicalRegex = /補助|申請|罰款|罰鍰|法規|新制|疫苗|副作用|食藥署|衛福部|教育部|勞動部/i;
+
+  if (
+    options.hasUrl ||
+    factCheckRegex.test(text) ||
+    timeSensitiveRegex.test(text) ||
+    volatileInfoRegex.test(text) ||
+    policyMedicalRegex.test(text)
+  ) {
+    return { mode: 'force', enableGrounding: true, reason: 'volatile_or_factcheck' };
+  }
+
+  // 3. 直接跳過 (skip)：簡短閒聊、純文字翻譯/潤稿/文案/OCR、純數學/靜態單位換算、程式/Excel 語法
+  const shortChitchatRegex = /^(嗨|哈囉|你好|您好|早安|午安|晚安|謝謝|感謝|辛苦了|哈哈+|ok|okay|hi|hello|thanks|thx|測試|test)[!！?？。.\s~～]*$/i;
+  if (!options.hasImage && text.length <= 12 && shortChitchatRegex.test(text)) {
+    return { mode: 'skip', enableGrounding: false, reason: 'chitchat' };
+  }
+
+  const textTransformRegex = /(翻譯|翻成|譯成|潤飾|潤稿|改寫|幫我寫|擬一封|寫一封|請假信|道歉信|賀詞|祝福語|整理重點|幫我打出來|轉成文字|擷取文字|\bocr\b)/i;
+  if (textTransformRegex.test(text)) {
+    return { mode: 'skip', enableGrounding: false, reason: 'text_transform_or_ocr' };
+  }
+
+  const pureMathRegex = /^[\d\s+\-*/×÷().=%^]+(?:[=＝]|是多少|等於多少|怎麼算)?[?？\s]*$/;
+  const staticUnitRegex = /(公分|公尺|公里|英吋|英尺|英里|公斤|公克|台斤|磅|盎司|毫升|公升|坪|平方公尺|華氏|攝氏).*(換算|等於多少|轉成|幾)/i;
+  if (pureMathRegex.test(text) || staticUnitRegex.test(text)) {
+    return { mode: 'skip', enableGrounding: false, reason: 'math_or_unit' };
+  }
+
+  const codingFormulaRegex = /(\bexcel\b|\bvlookup\b|\bxlookup\b|\bsumif\b|\bcountif\b|樞紐分析|正則表達式|\bregex\b|語法怎麼寫|程式碼怎麼寫|sql\s*怎麼寫|\bpython\b|\bjavascript\b)/i;
+  if (codingFormulaRegex.test(text)) {
+    return { mode: 'skip', enableGrounding: false, reason: 'coding_or_excel' };
+  }
+
+  // 4. 灰色地帶 (auto)：預設開啟 Grounding 交由 Gemini 自主決定
+  return { mode: 'auto', enableGrounding: true, reason: 'model_auto' };
 }
 
 /**
