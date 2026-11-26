@@ -154,21 +154,30 @@ function processMessage(event) {
     return;
   }
 
-  // 2. 指令查詢與使用幫助
-  if (userText === '指令查詢' || userText === '幫助' || userText === '/help' || userText === 'help') {
+  // 2. 指令查詢與使用幫助（支援直接輸入 /help 或群組 @InfoCheckAI /help）
+  const normalizedCmd = stripBotMention(userText, event.message.mention).toLowerCase();
+  if (normalizedCmd === '指令查詢' || normalizedCmd === '幫助' || normalizedCmd === '/help' || normalizedCmd === 'help') {
     const webAppUrl = typeof getWebAppUrl === 'function' ? getWebAppUrl() : (PropertiesService.getScriptProperties().getProperty('WEB_APP_URL') || '');
     const urlSection = webAppUrl ? `\n\n📖 完整圖文手冊與指令範例：\n${webAppUrl}` : '';
 
     const helpMsg = `🤖 AI 資訊查核助手｜快速指南
 
 🌟 常用核心口訣（群組內一律請 @ 機器人，不打擾平時聊天）：
-1️⃣ 聯網問答：@AI ＋ 提問（例：@AI 明天天氣如何？）
+1️⃣ 聯網問答：@AI ＋ 提問（例：@AI 最近全家霜淇淋口味？）
 2️⃣ 事實查核：@AI ＋ 查證內容（例：@AI 真的假的？吃菠菜配豆腐會結石？）
 3️⃣ 影片整理：@AI ＋ YouTube 網址（例：@AI 幫我整理大綱 https://youtu.be/...）
 4️⃣ 詐騙偵測：@AI ＋ 網址（例：@AI 這網站安全嗎 https://...）
-5️⃣ 路況停車：@Bot ＋ 路況或停車（例：@Bot 台南到新竹即時路況）
-6️⃣ 圖片查核：回覆圖片並 @AI ＋ 提問（例：@AI 這張圖是真的嗎？）
-7️⃣ 查詢 ID：輸入 /get_id${urlSection}`;
+5️⃣ 圖片查核：回覆圖片並 @AI ＋ 提問（例：@AI 這張圖是真的嗎？）
+
+🇹🇼 台灣官方即時 API（@AI ＋ 關鍵字自動直連）：
+▫️ 油價：95無鉛油價多少 / 中油油價
+▫️ 發票：最新統一發票中獎號碼
+▫️ 急診：台大醫院急診有滿床嗎（須含醫院名）
+▫️ 天氣：明天台北天氣會下雨嗎（須含縣市名）
+▫️ 路況：國1 台北到新竹路況 / 1968
+▫️ 停車：新竹巨城附近好停車嗎（須含縣市名）
+
+🔧 系統指令：輸入 /get_id 查詢群組或個人 ID${urlSection}`;
     replyToLine(replyToken, helpMsg);
     return;
   }

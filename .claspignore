@@ -1,6 +1,7 @@
 # 忽略所有檔案
 **/**
 
-# 僅允許推送 Code_Interactions.gs 與 GAS 設定檔
+# 僅允許推送 Code_Interactions.gs、HelpView.gs 與 GAS 設定檔
 !Code_Interactions.gs
+!HelpView.gs
 !appsscript.json
